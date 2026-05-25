@@ -1,0 +1,11 @@
+toml
+# In gradle/libs.versions.toml
+
+[versions]
+# ... other versions ...
+coreKtx = "1.13.1"                 # <--- CORRECT
+activityCompose = "1.9.0"          # <--- CORRECT
+lifecycleRuntimeKtx = "2.7.0"      # <--- CORRECT
+# Make sure you have a version for the fragment library itself
+fragmentKtx = "1.7.0"              # <--- ADD OR CORRECT THIS
+# ... etc.

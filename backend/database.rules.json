@@ -1,0 +1,12 @@
+{
+  "rules": {
+    ".read": "auth != null",
+    ".write": "auth != null",
+    "child_presence": {
+      "$childId": {
+        ".read": "auth != null",
+        ".write": "auth != null && auth.uid == $childId"
+      }
+    }
+  }
+}

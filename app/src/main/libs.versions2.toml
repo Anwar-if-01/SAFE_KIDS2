@@ -1,0 +1,7 @@
+toml
+# In gradle/libs.versions.toml, under the [libraries] section
+
+[libraries]
+# ...
+androidx-fragment-ktx = { group = "androidx.fragment", name = "fragment-ktx", version.ref = "fragmentKtx" }
+# ... other libraries

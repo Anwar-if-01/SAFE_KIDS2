@@ -1,0 +1,27 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    
+    // Helper functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function isParentOf(childId) {
+      // Note: In storage rules, we can't easily query Firestore 'users' collection without a custom token/claims
+      // For now, we assume if the folder path starts with childId, it belongs to that child.
+      // A more secure way is to use custom claims 'parentId' in the user's auth token.
+      return isAuthenticated(); 
+    }
+
+    match /child_avatars/{childId}/{allPaths=**} {
+      allow read: if isAuthenticated(); // Parents need to see their children's avatars
+      allow write: if isAuthenticated() && request.auth.uid == childId;
+    }
+    
+    match /screenshots/{childId}/{allPaths=**} {
+      allow read: if isAuthenticated(); // Parents see screenshots
+      allow write: if isAuthenticated() && request.auth.uid == childId;
+    }
+  }
+}
