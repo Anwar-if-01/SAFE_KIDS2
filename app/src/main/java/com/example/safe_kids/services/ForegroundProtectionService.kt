@@ -98,9 +98,11 @@ class ForegroundProtectionService : Service() {
                 Log.d(TAG, "User authenticated in service: ${user.uid}. Starting listeners.")
                 startBackgroundTasks()
             } else {
-                Log.w(TAG, "No user session in service. Listeners paused.")
-                // Optionally stop service if no user for a long time
-            }
+            Log.w(TAG, "No user session in service. Listeners paused.")
+                tasksStarted = false
+                instantBlockListener?.remove()
+                instantBlockListener = null
+        }
         }
         FirebaseAuth.getInstance().addAuthStateListener(authStateListener!!)
 
@@ -654,7 +656,9 @@ class ForegroundProtectionService : Service() {
                     Log.e(TAG, "startInstantBlockListener: Firestore error: ${e.message}", e)
                     // Restart listener after 3 seconds on error
                     android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-                        startInstantBlockListener()
+                        if (instantBlockListener == null) {
+                            startInstantBlockListener()
+                        }
                     }, 3000)
                     return@addSnapshotListener
                 }
@@ -682,7 +686,11 @@ class ForegroundProtectionService : Service() {
 
                 val blocked = snapshot.getBoolean("instantBlock") ?: false
                 Log.d(TAG, "startInstantBlockListener: snapshot received. instantBlock=$blocked")
-                applyInstantBlock(blocked)
+                val currentBlocked = getSharedPreferences("safe_kids_prefs", android.content.Context.MODE_PRIVATE)
+                    .getBoolean("instant_block", false)
+                if (blocked != currentBlocked) {
+                    applyInstantBlock(blocked)
+                }
 
                 // --- New: Study Mode listener on children/{childId} -> studyMode nested map ---
                 try {
@@ -738,11 +746,13 @@ class ForegroundProtectionService : Service() {
             .apply()
 
         val accessibilityService = com.example.safe_kids.services.SafeKidsAccessibilityService.getInstance()
+        Log.d("InstantBlock", "AccessibilityService instance: $accessibilityService")
+
         if (accessibilityService != null) {
             accessibilityService.setInstantBlocked(blocked)
             Log.d("InstantBlock", "AccessibilityService notified: $blocked")
         } else {
-            Log.w("InstantBlock", "AccessibilityService is null")
+            Log.w("InstantBlock", "AccessibilityService is null — reading from SharedPrefs on next event")
         }
     }
 
@@ -1058,6 +1068,8 @@ class ForegroundProtectionService : Service() {
                     val totalUsageMs = todayUsageList.sumOf { it.durationMillis }
                     val totalUsageMinutes = (totalUsageMs / (1000 * 60)).toInt()
                     val allowedMinutes = currentLimitMinutes + currentExtendedMinutes
+
+                    Log.d("ScreenTimeDebug", "totalUsageMinutes=$totalUsageMinutes allowedMinutes=$allowedMinutes currentLimitMinutes=$currentLimitMinutes extendedMinutes=$currentExtendedMinutes")
                     
                     if (totalUsageMinutes >= allowedMinutes && allowedMinutes > 0) {
                         if (!isGlobalLockoutActive) {

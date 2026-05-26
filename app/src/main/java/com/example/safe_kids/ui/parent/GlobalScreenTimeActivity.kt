@@ -196,11 +196,11 @@ class GlobalScreenTimeActivity : ComponentActivity() {
                                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                                         Text("Minutes", style = MaterialTheme.typography.labelMedium)
                                         Row(verticalAlignment = Alignment.CenterVertically) {
-                                            IconButton(onClick = { if (selectedMinutes > 0) selectedMinutes -= 15 }) {
+                                            IconButton(onClick = { if (selectedMinutes > 0) selectedMinutes-- }) {
                                                 Text("-", style = MaterialTheme.typography.headlineMedium)
                                             }
                                             Text(String.format("%02d", selectedMinutes), style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Bold)
-                                            IconButton(onClick = { if (selectedMinutes < 45) selectedMinutes += 15 }) {
+                                            IconButton(onClick = { if (selectedMinutes < 59) selectedMinutes++ }) {
                                                 Text("+", style = MaterialTheme.typography.headlineMedium)
                                             }
                                         }
@@ -214,7 +214,7 @@ class GlobalScreenTimeActivity : ComponentActivity() {
                                 onClick = {
                                     val totalMinutes = selectedHours * 60 + selectedMinutes
                                     if (totalMinutes == 0) {
-                                        Toast.makeText(this@GlobalScreenTimeActivity, "Limit must be at least 15 minutes", Toast.LENGTH_SHORT).show()
+                                        Toast.makeText(this@GlobalScreenTimeActivity, "Limit must be at least 1 minute", Toast.LENGTH_SHORT).show()
                                         return@Button
                                     }
                                     viewModel.saveConfig(

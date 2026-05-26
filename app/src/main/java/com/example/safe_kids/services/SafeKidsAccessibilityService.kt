@@ -236,8 +236,7 @@ class SafeKidsAccessibilityService : AccessibilityService() {
                 loadBlockedApps()
                 loadAppCategories()
                 startCommandListener()
-                startInstantBlockListener()
-// Instant Block Firestore listener
+
 
                 registerPackageReceiver()
                 syncInstalledAppsWithFirestore()
@@ -291,14 +290,17 @@ class SafeKidsAccessibilityService : AccessibilityService() {
                 
                 // Auto-return to app after service is connected
                 withContext(Dispatchers.Main) {
-                    delay(500) // Small delay to let system stabilize
+                    delay(800)
                     val launchIntent = packageManager.getLaunchIntentForPackage(packageName)
                     if (launchIntent != null) {
-                        launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                        launchIntent.addFlags(
+                            Intent.FLAG_ACTIVITY_NEW_TASK or
+                                    Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or
+                                    Intent.FLAG_ACTIVITY_SINGLE_TOP
+                        )
                         try {
                             startActivity(launchIntent)
                             Log.d(TAG, "Service connected, auto-returning to app via launcher intent")
-                            // ONLY show toast if protection is actually enabled
                             if (isProtectionEnabled) {
                                 Toast.makeText(this@SafeKidsAccessibilityService, "Safe Kids Protection Enabled", Toast.LENGTH_SHORT).show()
                             }
@@ -367,34 +369,6 @@ class SafeKidsAccessibilityService : AccessibilityService() {
             }
     }
 
-    private var instantBlockListener: ListenerRegistration? = null
-
-    private fun startInstantBlockListener() {
-        val currentUser = FirebaseAuth.getInstance().currentUser ?: return
-        val childId = currentUser.uid
-
-        Log.d(TAG, "Starting instantBlock listener for child: $childId")
-
-        instantBlockListener?.remove()
-
-        // Must run on main thread for Firestore snapshot listeners
-        serviceScope.launch(Dispatchers.Main) {
-            instantBlockListener = FirebaseFirestore.getInstance()
-                .collection("children")
-                .document(childId)
-                .addSnapshotListener { snapshot, e ->
-                    if (e != null) {
-                        Log.w(TAG, "Listen failed for instantBlock.", e)
-                        return@addSnapshotListener
-                    }
-                    if (snapshot != null && snapshot.exists()) {
-                        val blocked = snapshot.getBoolean("instantBlock") ?: false
-                        Log.d("InstantBlock", "Snapshot received: instantBlock=$blocked")
-                        setInstantBlocked(blocked)
-                    }
-                }
-        }
-    }
 
     private fun loadAppCategories() {
         val currentUser = FirebaseAuth.getInstance().currentUser ?: return
@@ -417,11 +391,10 @@ class SafeKidsAccessibilityService : AccessibilityService() {
         Log.d(TAG, "Handling command: ${command.type}")
         when (command.type) {
             CommandType.INSTANT_BLOCK -> {
-                isInstantBlocked = true
-                performGlobalAction(GLOBAL_ACTION_HOME)
+                setInstantBlocked(true)
             }
             CommandType.UNBLOCK -> {
-                isInstantBlocked = false
+                setInstantBlocked(false)
             }
             CommandType.TAKE_SCREENSHOT -> {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -465,11 +438,10 @@ class SafeKidsAccessibilityService : AccessibilityService() {
                 }
             }
             CommandType.LOCK_DEVICE -> {
-                isInstantBlocked = true
-                performGlobalAction(GLOBAL_ACTION_HOME)
+                setInstantBlocked(true)
             }
             CommandType.UNLOCK_DEVICE -> {
-                isInstantBlocked = false
+                setInstantBlocked(false)
             }
             else -> {
                 Log.d(TAG, "Unhandled command type: ${command.type}")
@@ -560,7 +532,6 @@ class SafeKidsAccessibilityService : AccessibilityService() {
     }
 
     override fun onDestroy() {
-        try { instantBlockListener?.remove(); instantBlockListener = null } catch (e: Exception) { }
         try { commandListener?.remove() } catch (e: Exception) { }
         instance = null
         isMonitoringEnabled = false
@@ -572,9 +543,8 @@ class SafeKidsAccessibilityService : AccessibilityService() {
 
         // INSTANT BLOCK CHECK - Priority 1
         val packageName = event.packageName?.toString() ?: return
-        val prefs = getSharedPreferences("safe_kids_prefs", MODE_PRIVATE)
-        val spBlocked = prefs.getBoolean("instant_block", false)
-        if (isInstantBlocked || spBlocked) {
+        if (isInstantBlocked) {
+            Log.d("InstantBlock", "Event received: $packageName isSystem=${isSystemApp(packageName)}")
             if (!isSystemApp(packageName)) {
                 Log.d("InstantBlock", "Blocking app: $packageName")
                 performGlobalAction(GLOBAL_ACTION_HOME)
@@ -603,8 +573,7 @@ class SafeKidsAccessibilityService : AccessibilityService() {
         if (checkUninstallAttempt(event)) return
 
         // INSTANT BLOCK — runs even if protection is disabled
-        val prefs = getSharedPreferences("safe_kids_prefs", MODE_PRIVATE)
-        val spBlocked = prefs.getBoolean("instant_block", false)
+
         if (isInstantBlocked) {
             if (!isSystemApp(packageName)) {
                 Log.d("InstantBlock", "handleWindowStateChanged blocking: $packageName")
@@ -613,8 +582,13 @@ class SafeKidsAccessibilityService : AccessibilityService() {
             }
         }
 
-        // Protection master switch
+        // Protection master switch — but still enforce instant block even if protection is off
         if (!isProtectionEnabled) {
+            if (isInstantBlocked && !isSystemApp(packageName)) {
+                Log.d("InstantBlock", "Protection off but instant block active — blocking: $packageName")
+                performGlobalAction(GLOBAL_ACTION_HOME)
+                return
+            }
             logAppUsage(packageName)
             return
         }
@@ -639,7 +613,7 @@ class SafeKidsAccessibilityService : AccessibilityService() {
 
         // --- Usage Tracking ---
         if (packageName != lastForegroundApp) {
-            dismissBlockingOverlay()
+            if (!isInstantBlocked) dismissBlockingOverlay()
             val now = System.currentTimeMillis()
             lastForegroundApp?.let { oldPkg ->
                 val duration = now - lastAppStartTime
@@ -882,9 +856,15 @@ class SafeKidsAccessibilityService : AccessibilityService() {
     internal fun blockCurrentApp(packageName: String) {
         Log.w(TAG, "Blocking application: $packageName")
         sendAppBlockedNotification(packageName)
+
+        // When instant block is active, skip overlay and just go home
+        // The overlay can be dismissed, letting the user back in
+        if (isInstantBlocked) {
+            performGlobalAction(GLOBAL_ACTION_HOME)
+            return
+        }
+
         showBlockingOverlay(packageName)
-        
-        // Method 1: Go to home screen
         performGlobalAction(GLOBAL_ACTION_HOME)
     }
 

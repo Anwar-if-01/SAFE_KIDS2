@@ -310,11 +310,11 @@ fun ChildModeScreen(
                 scope.launch {
                     restrictionRepository.startRestrictionSync(user.id).collect {}
                 }
-                
+
                 locationService.setChildId(user.id)
                 locationService.startLocationTracking()
                 locationService.enableLocationSharing(user.id)
-                
+
                 val serviceIntent = Intent(context, com.example.safe_kids.services.ForegroundProtectionService::class.java)
                 if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
                     context.startForegroundService(serviceIntent)
