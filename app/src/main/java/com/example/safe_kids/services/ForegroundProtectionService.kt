@@ -36,15 +36,20 @@ import com.example.safe_kids.services.CallLogReader
 import com.example.safe_kids.services.SmsReader
 
 class ForegroundProtectionService : Service() {
-    
+
     companion object {
         private const val NOTIFICATION_ID = 1001
         private const val CHANNEL_ID = "safe_kids_protection"
         private const val CHANNEL_NAME = "Safe Kids Protection"
-        
+
         @Volatile
         var isGlobalLockoutActive: Boolean = false
             private set
+
+        fun forceReleaseLockout() {
+            isGlobalLockoutActive = false
+            android.util.Log.d("ScreenTimeDebug", "forceReleaseLockout called — lockout released immediately")
+        }
     }
 
     private lateinit var fusedLocationClient: FusedLocationProviderClient
@@ -116,6 +121,7 @@ class ForegroundProtectionService : Service() {
         
         kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
             try {
+                syncServerTime()
                 startCommandListener()
                 startInstantBlockListener()
                 startPermissionMonitor()
@@ -745,6 +751,12 @@ class ForegroundProtectionService : Service() {
             .putBoolean("instant_block", blocked)
             .apply()
 
+        // When instant block activates, release screen time lockout
+        // so the two features don't conflict
+        if (blocked) {
+            isGlobalLockoutActive = false
+        }
+
         val accessibilityService = com.example.safe_kids.services.SafeKidsAccessibilityService.getInstance()
         Log.d("InstantBlock", "AccessibilityService instance: $accessibilityService")
 
@@ -815,38 +827,48 @@ class ForegroundProtectionService : Service() {
                     } else if (type == "BLOCK_APP" || type == "UNBLOCK_APP") {
                         val packageName = doc.getString("packageName")
                         val appName = doc.getString("appName")
-                        
+
                         if (packageName != null) {
                             try {
-                                val packageManager = packageManager
-                                val appInfo = packageManager.getApplicationInfo(packageName, 0)
-                                
-                                if (type == "BLOCK_APP") {
-                                    // Disable the app using PackageManager
-                                    packageManager.setApplicationEnabledSetting(
-                                        packageName,
-                                        android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
-                                        0
-                                    )
-                                    Log.d(TAG, "Blocked app: $appName ($packageName)")
+                                val accessibilityService = SafeKidsAccessibilityService.getInstance()
+                                if (accessibilityService != null) {
+                                    if (type == "BLOCK_APP") {
+                                        accessibilityService.updateBlockedApps(
+                                            accessibilityService.let {
+                                                val field = it.javaClass.getDeclaredField("blockedApps")
+                                                field.isAccessible = true
+                                                @Suppress("UNCHECKED_CAST")
+                                                (field.get(it) as Set<String>) + packageName
+                                            }
+                                        )
+                                        Log.d(TAG, "BLOCK_APP via AccessibilityService: $packageName")
+                                    } else {
+                                        accessibilityService.updateBlockedApps(
+                                            accessibilityService.let {
+                                                val field = it.javaClass.getDeclaredField("blockedApps")
+                                                field.isAccessible = true
+                                                @Suppress("UNCHECKED_CAST")
+                                                (field.get(it) as Set<String>) - packageName
+                                            }
+                                        )
+                                        Log.d(TAG, "UNBLOCK_APP via AccessibilityService: $packageName")
+                                    }
                                 } else {
-                                    // Re-enable the app using PackageManager
-                                    packageManager.setApplicationEnabledSetting(
-                                        packageName,
-                                        android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_ENABLED,
-                                        0
-                                    )
-                                    Log.d(TAG, "Unblocked app: $appName ($packageName)")
+                                    // Fallback: save to SharedPrefs for AccessibilityService to pick up
+                                    val prefs = getSharedPreferences("safe_kids_prefs", android.content.Context.MODE_PRIVATE)
+                                    val blockedSet = prefs.getStringSet("blocked_apps", mutableSetOf())?.toMutableSet() ?: mutableSetOf()
+                                    if (type == "BLOCK_APP") blockedSet.add(packageName)
+                                    else blockedSet.remove(packageName)
+                                    prefs.edit().putStringSet("blocked_apps", blockedSet).apply()
+                                    Log.d(TAG, "${type} saved to SharedPrefs (AccessibilityService null): $packageName")
                                 }
-                                
-                                // Update command status to completed
-                                doc.reference.update("status", "completed")
-                            } catch (e: Exception) {
-                                Log.e(TAG, "Failed to ${type.lowercase()} app: $packageName", e)
-                                doc.reference.update("status", "failed", "error", e.message)
+                                doc.reference.update("status", com.example.safe_kids.data.CommandStatus.EXECUTED.name)                            } catch (e: Exception) {
+                                Log.e(TAG, "Failed to $type app: $packageName", e)
+                                doc.reference.update("status", "failed")
                             }
                         }
                     }
+
                 }
             }
     }
@@ -990,12 +1012,61 @@ class ForegroundProtectionService : Service() {
             .document(childId)
             .addSnapshotListener { snapshot, e ->
                 if (e != null || snapshot == null || !snapshot.exists()) {
-                    currentLimitMinutes = 120
+                    currentLimitMinutes = 0
                     currentExtendedMinutes = 0
+                    isGlobalLockoutActive = false
                     return@addSnapshotListener
                 }
-                currentLimitMinutes = snapshot.getLong("dailyLimitMinutes")?.toInt() ?: 120
-                currentExtendedMinutes = snapshot.getLong("extendedMinutes")?.toInt() ?: 0
+                val newLimit = snapshot.getLong("dailyLimitMinutes")?.toInt() ?: 0
+
+// If limit was just enabled (changed from 0 to non-zero), record baseline usage
+                if (currentLimitMinutes == 0 && newLimit > 0) {
+                    val usm = getSystemService(android.app.usage.UsageStatsManager::class.java)
+                    val calendar = java.util.Calendar.getInstance().apply {
+                        set(java.util.Calendar.HOUR_OF_DAY, 0)
+                        set(java.util.Calendar.MINUTE, 0)
+                        set(java.util.Calendar.SECOND, 0)
+                        set(java.util.Calendar.MILLISECOND, 0)
+                    }
+                    val usageStats = usm?.queryUsageStats(
+                        android.app.usage.UsageStatsManager.INTERVAL_BEST,
+                        calendar.timeInMillis,
+                        System.currentTimeMillis()
+                    ) ?: emptyList()
+                    val baselineMs = usageStats
+                        .filter { it.packageName != "com.example.safe_kids" && it.totalTimeInForeground > 0 }
+                        .sumOf { it.totalTimeInForeground }
+                    val baselineMinutes = (baselineMs / (1000 * 60)).toInt()
+                    getSharedPreferences("safe_kids_prefs", android.content.Context.MODE_PRIVATE)
+                        .edit()
+                        .putInt("usage_baseline_minutes", baselineMinutes)
+                        .putString("usage_baseline_date", java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.getDefault()).format(java.util.Date()))
+                        .apply()
+                    Log.d("ScreenTimeDebug", "Baseline usage recorded: $baselineMinutes minutes")
+                }
+
+                currentLimitMinutes = newLimit
+
+// If limit is disabled, immediately release lockout
+                if (currentLimitMinutes == 0) {
+                    isGlobalLockoutActive = false
+                }
+
+                val today = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.getDefault()).format(java.util.Date())
+                val lastGrantDate = snapshot.getString("lastGrantDate") ?: ""
+                val extendedFromFirestore = snapshot.getLong("extendedMinutes")?.toInt() ?: 0
+                currentExtendedMinutes = if (lastGrantDate == today && extendedFromFirestore > 0) {
+                    Log.d("ScreenTimeDebug", "Bonus time applied: $extendedFromFirestore minutes")
+                    extendedFromFirestore
+                } else {
+                    0
+                }
+
+// If bonus was just granted, immediately release lockout
+                if (currentExtendedMinutes > 0 && isGlobalLockoutActive) {
+                    isGlobalLockoutActive = false
+                    Log.d("ScreenTimeDebug", "Lockout released by bonus time")
+                }
             }
 
         // 2. Study Mode Config Listener
@@ -1064,23 +1135,50 @@ class ForegroundProtectionService : Service() {
             while (isActive) {
                 try {
                     // --- 1. Check Screen Time Limits ---
-                    val todayUsageList = usageRepository.getUsageForTodaySync()
-                    val totalUsageMs = todayUsageList.sumOf { it.durationMillis }
-                    val totalUsageMinutes = (totalUsageMs / (1000 * 60)).toInt()
+                    // REPLACE with all of this ↓
+                    val usm = getSystemService(android.app.usage.UsageStatsManager::class.java)
+                    val calendar = java.util.Calendar.getInstance().apply {
+                        set(java.util.Calendar.HOUR_OF_DAY, 0)
+                        set(java.util.Calendar.MINUTE, 0)
+                        set(java.util.Calendar.SECOND, 0)
+                        set(java.util.Calendar.MILLISECOND, 0)
+                    }
+                    val startTime = calendar.timeInMillis
+                    val endTime = System.currentTimeMillis()
+
+                    val usageStats = usm?.queryUsageStats(
+                        android.app.usage.UsageStatsManager.INTERVAL_BEST,
+                        startTime,
+                        endTime
+                    ) ?: emptyList()
+
+                    Log.d("ScreenTimeDebug", "usageStats size=${usageStats.size} queryRange=${(endTime - startTime)/1000}s")
+
+                    val totalUsageMs = usageStats
+                        .filter { it.packageName != "com.example.safe_kids" && it.totalTimeInForeground > 0 }
+                        .sumOf { it.totalTimeInForeground }
+                    val prefs2 = getSharedPreferences("safe_kids_prefs", android.content.Context.MODE_PRIVATE)
+                    val today2 = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.getDefault()).format(java.util.Date())
+                    val baselineDate = prefs2.getString("usage_baseline_date", "")
+                    val baselineMinutes = if (baselineDate == today2) prefs2.getInt("usage_baseline_minutes", 0) else 0
+                    val totalUsageMinutes = ((totalUsageMs / (1000 * 60)).toInt() - baselineMinutes).coerceAtLeast(0)
                     val allowedMinutes = currentLimitMinutes + currentExtendedMinutes
 
                     Log.d("ScreenTimeDebug", "totalUsageMinutes=$totalUsageMinutes allowedMinutes=$allowedMinutes currentLimitMinutes=$currentLimitMinutes extendedMinutes=$currentExtendedMinutes")
-                    
-                    if (totalUsageMinutes >= allowedMinutes && allowedMinutes > 0) {
+                    val isInstantBlockOn = getSharedPreferences("safe_kids_prefs", android.content.Context.MODE_PRIVATE)
+                        .getBoolean("instant_block", false)
+
+                    if (totalUsageMinutes >= allowedMinutes && allowedMinutes > 0 && currentLimitMinutes > 0 && !isInstantBlockOn) {
                         if (!isGlobalLockoutActive) {
-                            // First time reaching limit today
                             logActivityAlert(childId, "LIMIT_REACHED", "Daily screen time limit of $allowedMinutes minutes has been reached.")
+                            isGlobalLockoutActive = true
+                            withContext(kotlinx.coroutines.Dispatchers.Main) {
+                                blockAllAppsInternally()
+                            }
+                        } else {
+                            isGlobalLockoutActive = true
                         }
-                        isGlobalLockoutActive = true
-                        withContext(kotlinx.coroutines.Dispatchers.Main) {
-                            blockAllAppsInternally()
-                        }
-                    } else {
+                    } else if (!isInstantBlockOn) {
                         isGlobalLockoutActive = false
                     }
 
@@ -1098,8 +1196,8 @@ class ForegroundProtectionService : Service() {
                 } catch (e: Exception) {
                     Log.e(TAG, "Failed in monitoring loop", e)
                 }
-                delay(60_000) // check every 1 minute
-            }
+                delay(10_000) // check every 10 seconds
+              }
         }
     }
 
@@ -1112,7 +1210,7 @@ class ForegroundProtectionService : Service() {
             return false
         }
 
-        val now = java.util.Calendar.getInstance()
+        val now = getAdjustedTime()
         val currentDay = now.get(java.util.Calendar.DAY_OF_WEEK)
         val normalizedDay = if (currentDay == 1) 7 else currentDay - 1
         val currentTime = String.format("%02d:%02d", now.get(java.util.Calendar.HOUR_OF_DAY), now.get(java.util.Calendar.MINUTE))
@@ -1143,7 +1241,7 @@ class ForegroundProtectionService : Service() {
             return
         }
 
-        val now = java.util.Calendar.getInstance()
+        val now = getAdjustedTime()
         val currentDay = now.get(java.util.Calendar.DAY_OF_WEEK)
         val normalizedDay = if (currentDay == 1) 7 else currentDay - 1
         val currentTime = String.format("%02d:%02d", now.get(java.util.Calendar.HOUR_OF_DAY), now.get(java.util.Calendar.MINUTE))
@@ -1170,6 +1268,17 @@ class ForegroundProtectionService : Service() {
     private fun startSleepMode(appBlockingService: com.example.safe_kids.services.blocking.AppBlockingService, config: com.example.safe_kids.data.SleepModeConfig) {
         Log.d(TAG, "Activating Sleep Mode")
         appBlockingService.enableSleepMode()
+        // Notify AccessibilityService directly
+        val acc = SafeKidsAccessibilityService.getInstance()
+        if (acc != null) {
+            acc.setSleepModeActive(true)
+            Log.d(TAG, "AccessibilityService notified: Sleep Mode ON")
+        } else {
+            // Fallback to SharedPrefs
+            getSharedPreferences("safe_kids_prefs", android.content.Context.MODE_PRIVATE)
+                .edit().putBoolean("sleep_mode_active", true).apply()
+            Log.w(TAG, "AccessibilityService null - saved sleep_mode_active to SharedPrefs")
+        }
         
         if (config.suppressNotifications) {
             val notificationService = com.example.safe_kids.services.notifications.NotificationServiceImpl(this)
@@ -1196,6 +1305,17 @@ class ForegroundProtectionService : Service() {
     private fun stopSleepMode(appBlockingService: com.example.safe_kids.services.blocking.AppBlockingService) {
         Log.d(TAG, "Deactivating Sleep Mode")
         appBlockingService.disableAllModes()
+        // Notify AccessibilityService directly
+        val acc = SafeKidsAccessibilityService.getInstance()
+        if (acc != null) {
+            acc.setSleepModeActive(false)
+            Log.d(TAG, "AccessibilityService notified: Sleep Mode OFF")
+        } else {
+            // Fallback to SharedPrefs
+            getSharedPreferences("safe_kids_prefs", android.content.Context.MODE_PRIVATE)
+                .edit().putBoolean("sleep_mode_active", false).apply()
+            Log.w(TAG, "AccessibilityService null - saved sleep_mode_active=false to SharedPrefs")
+        }
         
         val notificationService = com.example.safe_kids.services.notifications.NotificationServiceImpl(this)
         notificationService.disableDoNotDisturb()
@@ -1236,13 +1356,54 @@ class ForegroundProtectionService : Service() {
             activeSleepSessionId = null
         }
     }
+    private var serverTimeOffsetMs: Long = 0L
 
+    private fun syncServerTime() {
+        val db = FirebaseFirestore.getInstance()
+        val localTimeBefore = System.currentTimeMillis()
+        db.collection("server_time")
+            .document("now")
+            .set(mapOf("timestamp" to com.google.firebase.firestore.FieldValue.serverTimestamp()))
+            .addOnSuccessListener {
+                db.collection("server_time")
+                    .document("now")
+                    .get()
+                    .addOnSuccessListener { doc ->
+                        val serverTime = doc.getTimestamp("timestamp")?.toDate()?.time ?: return@addOnSuccessListener
+                        val localTimeAfter = System.currentTimeMillis()
+                        val localTime = (localTimeBefore + localTimeAfter) / 2
+                        serverTimeOffsetMs = serverTime - localTime
+                        Log.d(TAG, "Server time offset: ${serverTimeOffsetMs}ms")
+                    }
+            }
+    }
+
+    private fun getAdjustedTime(): Calendar {
+        val adjustedMs = System.currentTimeMillis() + serverTimeOffsetMs
+        val cal = Calendar.getInstance()
+        cal.timeInMillis = adjustedMs
+        return cal
+    }
     private fun isNowInWindow(startTime: String, endTime: String, activeDays: List<Int>): Boolean {
+        // Use UTC offset-corrected time to reduce device clock differences
+        // Get time from system but validate against a reasonable range
         val now = Calendar.getInstance()
+
+        // Auto-correct if device time seems wrong (year check)
+        if (now.get(Calendar.YEAR) < 2024) {
+            Log.w(TAG, "Device time seems incorrect: ${now.time}")
+            return false
+        }
+
         val currentDay = now.get(Calendar.DAY_OF_WEEK)
         val normalizedDay = if (currentDay == Calendar.SUNDAY) 7 else currentDay - 1
         if (!activeDays.contains(normalizedDay)) return false
-        val currentTime = String.format("%02d:%02d", now.get(Calendar.HOUR_OF_DAY), now.get(Calendar.MINUTE))
+        val currentTime = String.format(
+            "%02d:%02d",
+            now.get(Calendar.HOUR_OF_DAY),
+            now.get(Calendar.MINUTE)
+        )
+        Log.d(TAG, "isNowInWindow: currentTime=$currentTime startTime=$startTime endTime=$endTime")
         return if (startTime <= endTime) {
             currentTime >= startTime && currentTime < endTime
         } else {

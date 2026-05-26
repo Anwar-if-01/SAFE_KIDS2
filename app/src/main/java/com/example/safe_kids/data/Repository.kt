@@ -245,9 +245,10 @@ enum class CommandStatus {
 
 data class GlobalScreenTimeConfig(
     val childId: String = "",
-    val dailyLimitMinutes: Int = 120, // default 2 hours
+    val dailyLimitMinutes: Int = 120,
     val extendedMinutes: Int = 0,
-    val lastUpdated: Long = System.currentTimeMillis()
+    val lastUpdated: Long = System.currentTimeMillis(),
+    val lastGrantDate: String = ""
 )
 
 data class ScreenTimeRequest(

@@ -1,5 +1,6 @@
 package com.example.safe_kids.ui.child
 
+import android.annotation.SuppressLint
 import android.content.Intent
 import android.os.Bundle
 import android.widget.Toast
@@ -59,8 +60,30 @@ class TotalLockoutActivity : ComponentActivity() {
                 LaunchedEffect(Unit) {
                     while (true) {
                         timeRemaining = calculateTimeUntilMidnight()
+
+                        // Exit immediately if lockout was released from outside
                         if (!com.example.safe_kids.services.ForegroundProtectionService.isGlobalLockoutActive) {
                             finish()
+                            return@LaunchedEffect
+                        }
+                        // Listen for parent approval (bonus time granted)
+                        if (currentUser != null) {
+                            try {
+                                val limitDoc = com.google.firebase.firestore.FirebaseFirestore.getInstance()
+                                    .collection("screen_time_limits")
+                                    .document(currentUser.id)
+                                    .get()
+                                    .await()
+                                val extended = limitDoc.getLong("extendedMinutes")?.toInt() ?: 0
+                                val limit = limitDoc.getLong("dailyLimitMinutes")?.toInt() ?: 0
+
+                                // Release lockout immediately when bonus time is granted or limit is disabled
+                                if (limit == 0 || extended > 0) {
+                                    // Force release the lockout flag directly — don't wait for the 10s monitoring loop
+                                    com.example.safe_kids.services.ForegroundProtectionService.forceReleaseLockout()
+                                    finish()
+                                }
+                            } catch (e: Exception) { }
                         }
                         delay(1000)
                     }
@@ -229,7 +252,8 @@ class TotalLockoutActivity : ComponentActivity() {
         return String.format("%02d:%02d:%02d", hours, minutes, seconds)
     }
 
+    @SuppressLint("MissingSuperCall")
     override fun onBackPressed() {
-        // Prevent back button
+        // Intentionally blocked — prevent child from dismissing lockout screen
     }
 }

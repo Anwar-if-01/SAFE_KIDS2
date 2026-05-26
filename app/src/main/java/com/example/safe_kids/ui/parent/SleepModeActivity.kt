@@ -118,12 +118,12 @@ fun SleepModeScreen(childId: String, childName: String, onBack: () -> Unit) {
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
                             Text("Active Status", fontWeight = FontWeight.Bold)
-                            Text(if (config.isEnabled) "Scheduled" else "Disabled", style = MaterialTheme.typography.bodySmall)
+                            Text(if (config.Enabled) "Scheduled" else "Disabled", style = MaterialTheme.typography.bodySmall)
                         }
                         Switch(
-                            checked = config.isEnabled,
+                            checked = config.Enabled,
                             onCheckedChange = { 
-                                config = config.copy(isEnabled = it)
+                                config = config.copy(Enabled = it)
                                 saveConfig(db, childId, config)
                             }
                         )
@@ -188,10 +188,10 @@ fun SleepModeScreen(childId: String, childName: String, onBack: () -> Unit) {
                 Spacer(modifier = Modifier.weight(1f))
 
                 // Manual End Button
-                if (config.isEnabled) {
+                if (config.Enabled) {
                     Button(
                         onClick = {
-                            config = config.copy(isEnabled = false)
+                            config = config.copy(Enabled = false)
                             saveConfig(db, childId, config)
                         },
                         modifier = Modifier.fillMaxWidth(),
@@ -269,8 +269,7 @@ fun TimePickerCard(label: String, time: String, modifier: Modifier = Modifier, o
 
 private fun saveConfig(db: FirebaseFirestore, childId: String, config: SleepModeConfig) {
     val data = mapOf(
-        "isEnabled" to config.isEnabled,
-        "enabled" to config.isEnabled,
+        "enabled" to config.Enabled,
         "startTime" to config.startTime,
         "endTime" to config.endTime,
         "activeDays" to config.activeDays,

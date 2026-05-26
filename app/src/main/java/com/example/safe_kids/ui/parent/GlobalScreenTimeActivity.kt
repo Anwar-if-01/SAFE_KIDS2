@@ -49,12 +49,13 @@ class GlobalScreenTimeViewModel : ViewModel() {
                 if (snapshot.exists()) {
                     _config.value = GlobalScreenTimeConfig(
                         childId = childId,
-                        dailyLimitMinutes = snapshot.getLong("dailyLimitMinutes")?.toInt() ?: 120,
+                        dailyLimitMinutes = snapshot.getLong("dailyLimitMinutes")?.toInt() ?: 0,
                         extendedMinutes = snapshot.getLong("extendedMinutes")?.toInt() ?: 0,
-                        lastUpdated = snapshot.getLong("lastUpdated") ?: System.currentTimeMillis()
+                        lastUpdated = snapshot.getLong("lastUpdated") ?: System.currentTimeMillis(),
+                        lastGrantDate = snapshot.getString("lastGrantDate") ?: ""
                     )
                 } else {
-                    _config.value = GlobalScreenTimeConfig(childId = childId)
+                    _config.value = GlobalScreenTimeConfig(childId = childId, dailyLimitMinutes = 0)
                 }
             } catch (e: Exception) {
                 // Ignore errors
@@ -73,6 +74,11 @@ class GlobalScreenTimeViewModel : ViewModel() {
                 )
                 firestore.collection("screen_time_limits").document(currentChildId)
                     .set(newConfig).await()
+// Also reset extendedMinutes when disabling
+                if (minutes == 0) {
+                    firestore.collection("screen_time_limits").document(currentChildId)
+                        .update("extendedMinutes", 0).await()
+                }
                 _config.value = newConfig
                 onSuccess()
             } catch (e: Exception) {
@@ -84,26 +90,50 @@ class GlobalScreenTimeViewModel : ViewModel() {
     fun extendTime(minutesToAdd: Int, onSuccess: () -> Unit) {
         viewModelScope.launch {
             try {
-                val newExtended = _config.value.extendedMinutes + minutesToAdd
+                val today = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.getDefault())
+                    .format(java.util.Date())
+                val lastGrantDate = _config.value.lastGrantDate ?: ""
+
+                // Reset counter if it's a new day
+                val todayGranted = if (lastGrantDate == today) {
+                    _config.value.extendedMinutes + minutesToAdd
+                } else {
+                    minutesToAdd
+                }
+
                 firestore.collection("screen_time_limits").document(currentChildId)
                     .update(
-                        "extendedMinutes", newExtended,
+                        "extendedMinutes", todayGranted,
+                        "lastGrantDate", today,
                         "lastUpdated", System.currentTimeMillis()
                     ).await()
-                _config.value = _config.value.copy(extendedMinutes = newExtended)
-                
-                // If there's a pending request, we mark it as approved
+                _config.value = _config.value.copy(
+                    extendedMinutes = todayGranted,
+                    lastGrantDate = today
+                )
+
+                // Delete pending request
                 firestore.collection("screen_time_requests")
                     .document(com.google.firebase.auth.FirebaseAuth.getInstance().currentUser?.uid ?: "")
                     .collection("requests")
                     .document(currentChildId)
-                    .delete() // just delete it once handled
-                    
+                    .delete()
+
                 onSuccess()
-            } catch (e: Exception) {
-                // Handle
-            }
+            } catch (e: Exception) { }
         }
+    }
+    private val _hasPendingRequest = MutableStateFlow(false)
+    val hasPendingRequest: StateFlow<Boolean> = _hasPendingRequest
+
+    fun listenForRequests(parentId: String, childId: String) {
+        firestore.collection("screen_time_requests")
+            .document(parentId)
+            .collection("requests")
+            .document(childId)
+            .addSnapshotListener { snapshot, _ ->
+                _hasPendingRequest.value = snapshot != null && snapshot.exists()
+            }
     }
 }
 
@@ -119,13 +149,18 @@ class GlobalScreenTimeActivity : ComponentActivity() {
                 val viewModel: GlobalScreenTimeViewModel = viewModel()
                 LaunchedEffect(childId) {
                     viewModel.loadConfig(childId)
+                    val parentId = com.google.firebase.auth.FirebaseAuth.getInstance().currentUser?.uid ?: ""
+                    viewModel.listenForRequests(parentId, childId)
                 }
+
+                val hasPendingRequest by viewModel.hasPendingRequest.collectAsState()
                 
                 val config by viewModel.config.collectAsState()
                 val isLoading by viewModel.isLoading.collectAsState()
-                
+
                 var selectedHours by remember(config) { mutableIntStateOf(config.dailyLimitMinutes / 60) }
                 var selectedMinutes by remember(config) { mutableIntStateOf(config.dailyLimitMinutes % 60) }
+                var isLimitEnabled by remember(config) { mutableStateOf(config.dailyLimitMinutes > 0) }
 
                 Scaffold(
                     topBar = {
@@ -161,15 +196,35 @@ class GlobalScreenTimeActivity : ComponentActivity() {
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
-                            
+
                             Spacer(modifier = Modifier.height(32.dp))
-                            
-                            // Wheel Picker or simple buttons to pick hours/minutes
-                            // For simplicity, we'll use a Row with OutlinedTextFields or custom +/- controls
+
+// Enable/Disable toggle
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    "Enable Daily Limit",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Medium
+                                )
+                                Switch(
+                                    checked = isLimitEnabled,
+                                    onCheckedChange = { isLimitEnabled = it }
+                                )
+                            }
+
+                            Spacer(modifier = Modifier.height(16.dp))
+
+// Wheel Picker or simple buttons to pick hours/minutes
                             Card(
                                 modifier = Modifier.fillMaxWidth(),
-                                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-                                shape = RoundedCornerShape(16.dp)
+                                colors = CardDefaults.cardColors(
+                                    containerColor = if (isLimitEnabled) MaterialTheme.colorScheme.surfaceVariant
+                                    else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
+                                ),
                             ) {
                                 Row(
                                     modifier = Modifier.padding(24.dp).fillMaxWidth(),
@@ -212,8 +267,8 @@ class GlobalScreenTimeActivity : ComponentActivity() {
                             
                             Button(
                                 onClick = {
-                                    val totalMinutes = selectedHours * 60 + selectedMinutes
-                                    if (totalMinutes == 0) {
+                                    val totalMinutes = if (!isLimitEnabled) 0 else selectedHours * 60 + selectedMinutes
+                                    if (isLimitEnabled && totalMinutes == 0) {
                                         Toast.makeText(this@GlobalScreenTimeActivity, "Limit must be at least 1 minute", Toast.LENGTH_SHORT).show()
                                         return@Button
                                     }
@@ -235,11 +290,30 @@ class GlobalScreenTimeActivity : ComponentActivity() {
                             Divider(modifier = Modifier.padding(vertical = 32.dp))
                             
                             // Extend Time Section
-                            Text(
-                                "Grant Bonus Time",
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.Bold
-                            )
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    "Grant Bonus Time",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                if (hasPendingRequest) {
+                                    Card(
+                                        colors = CardDefaults.cardColors(containerColor = Color(0xFFFF6B35))
+                                    ) {
+                                        Text(
+                                            "⏰ Child is asking for more time!",
+                                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                                            color = Color.White,
+                                            style = MaterialTheme.typography.labelMedium,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                }
+                            }
                             Spacer(modifier = Modifier.height(8.dp))
                             Text(
                                 "Instantly unlock the device and add extra time for today.",

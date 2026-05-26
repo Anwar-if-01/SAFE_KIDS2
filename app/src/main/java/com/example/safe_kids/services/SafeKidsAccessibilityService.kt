@@ -187,6 +187,23 @@ class SafeKidsAccessibilityService : AccessibilityService() {
     }
 
     /** Called by ForegroundProtectionService when Firestore `children/{id}/instantBlock` changes. */
+    private var instantBlockJob: kotlinx.coroutines.Job? = null
+    fun setSleepModeActive(active: Boolean) {
+        Log.d(TAG, "setSleepModeActive called: $active")
+        if (active) {
+            currentMode = com.example.safe_kids.services.blocking.AppMode.SLEEP_MODE
+        } else {
+            if (currentMode == com.example.safe_kids.services.blocking.AppMode.SLEEP_MODE) {
+                currentMode = com.example.safe_kids.services.blocking.AppMode.NORMAL
+            }
+        }
+        // Keep SharedPrefs in sync as fallback
+        getSharedPreferences("safe_kids_prefs", android.content.Context.MODE_PRIVATE)
+            .edit().putBoolean("sleep_mode_active", active).apply()
+        if (active) {
+            performGlobalAction(GLOBAL_ACTION_HOME)
+        }
+    }
     fun setInstantBlocked(blocked: Boolean) {
         isInstantBlocked = blocked
         Log.d("InstantBlock", "setInstantBlocked: $blocked")
@@ -199,8 +216,39 @@ class SafeKidsAccessibilityService : AccessibilityService() {
         if (blocked) {
             performGlobalAction(GLOBAL_ACTION_HOME)
             Log.d("InstantBlock", "Kicked to home screen")
+
+            // Start continuous blocking loop
+            instantBlockJob?.cancel()
+            instantBlockJob = serviceScope.launch {
+                while (isInstantBlocked) {
+                    delay(500)
+                    withContext(kotlinx.coroutines.Dispatchers.Main) {
+                        try {
+                            val usm = getSystemService(android.app.usage.UsageStatsManager::class.java)
+                            val now = System.currentTimeMillis()
+                            val stats = usm?.queryUsageStats(
+                                android.app.usage.UsageStatsManager.INTERVAL_BEST,
+                                now - 5000,
+                                now
+                            ) ?: emptyList()
+                            val currentApp = stats
+                                .filter { it.lastTimeUsed > now - 3000 }
+                                .maxByOrNull { it.lastTimeUsed }
+                                ?.packageName
+                            if (currentApp != null && !isSystemApp(currentApp) && currentApp != "com.example.safe_kids") {
+                                Log.d("InstantBlock", "Continuous block — kicking: $currentApp")
+                                performGlobalAction(GLOBAL_ACTION_HOME)
+                            }
+                        } catch (e: Exception) {
+                            Log.e("InstantBlock", "Error in continuous block loop", e)
+                        }
+                    }
+                }
+            }
         } else {
             Log.d("InstantBlock", "Block released - normal mode")
+            instantBlockJob?.cancel()
+            instantBlockJob = null
         }
     }
 
@@ -231,9 +279,20 @@ class SafeKidsAccessibilityService : AccessibilityService() {
                         Log.d(TAG, "Protection state updated: $isProtectionEnabled")
                     }
                 }
-                
+
                 checkPairingStatus()
                 loadBlockedApps()
+
+// Restore instant block state from SharedPrefs on service start
+                val prefs = getSharedPreferences("safe_kids_prefs", android.content.Context.MODE_PRIVATE)
+                isInstantBlocked = prefs.getBoolean("instant_block", false)
+                Log.d("InstantBlock", "Restored isInstantBlocked=$isInstantBlocked from SharedPrefs on service start")
+                // Restore sleep mode state from SharedPrefs on service start
+                val sleepModeActive = prefs.getBoolean("sleep_mode_active", false)
+                if (sleepModeActive) {
+                    currentMode = com.example.safe_kids.services.blocking.AppMode.SLEEP_MODE
+                    Log.d(TAG, "Restored Sleep Mode active from SharedPrefs on service start")
+                }
                 loadAppCategories()
                 startCommandListener()
 
@@ -443,6 +502,7 @@ class SafeKidsAccessibilityService : AccessibilityService() {
             CommandType.UNLOCK_DEVICE -> {
                 setInstantBlocked(false)
             }
+
             else -> {
                 Log.d(TAG, "Unhandled command type: ${command.type}")
             }
@@ -520,9 +580,7 @@ class SafeKidsAccessibilityService : AccessibilityService() {
     private suspend fun deleteCommand(command: ChildCommand) {
         try {
             val firestore = com.google.firebase.firestore.FirebaseFirestore.getInstance()
-            firestore.collection("commands")
-                .document(command.childId)
-                .collection("pending_commands")
+            firestore.collection(AuthConfig.CHILD_COMMANDS_COLLECTION)
                 .document(command.id)
                 .delete()
                 .await()
@@ -539,18 +597,39 @@ class SafeKidsAccessibilityService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        if (!isMonitoringEnabled || event == null) return
-
-        // INSTANT BLOCK CHECK - Priority 1
+        if (event == null) return
         val packageName = event.packageName?.toString() ?: return
-        if (isInstantBlocked) {
-            Log.d("InstantBlock", "Event received: $packageName isSystem=${isSystemApp(packageName)}")
-            if (!isSystemApp(packageName)) {
-                Log.d("InstantBlock", "Blocking app: $packageName")
-                performGlobalAction(GLOBAL_ACTION_HOME)
-                return
-            }
+
+// Priority 1 — Instant Block (works even if monitoring is disabled)
+// Only fire on window state changes to avoid duplicate blocks on content events
+        if (isInstantBlocked && !isSystemApp(packageName)
+            && event.eventType == android.view.accessibility.AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+            Log.d("InstantBlock", "Event received: $packageName — blocking")
+            performGlobalAction(GLOBAL_ACTION_HOME)
+            return
         }
+
+// Priority 2 — Screen Time Global Lockout (skip if instant block is active)
+        if (com.example.safe_kids.services.ForegroundProtectionService.isGlobalLockoutActive
+            && !isInstantBlocked
+            && packageName != "com.example.safe_kids"
+            && !isSystemApp(packageName)
+            && event.eventType == android.view.accessibility.AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+            Log.d("ScreenTimeDebug", "Lockout active — blocking app: $packageName")
+            val intent = android.content.Intent(
+                this,
+                com.example.safe_kids.ui.child.TotalLockoutActivity::class.java
+            ).apply {
+                addFlags(
+                    android.content.Intent.FLAG_ACTIVITY_NEW_TASK or
+                            android.content.Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
+                )
+            }
+            startActivity(intent)
+            return
+        }
+
+        if (!isMonitoringEnabled) return
 
         when (event.eventType) {
             AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> {
@@ -636,6 +715,12 @@ class SafeKidsAccessibilityService : AccessibilityService() {
         }
 
         // Priority 2: Sleep Mode
+        val spSleepMode = getSharedPreferences("safe_kids_prefs", android.content.Context.MODE_PRIVATE)
+            .getBoolean("sleep_mode_active", false)
+        if (spSleepMode && currentMode != com.example.safe_kids.services.blocking.AppMode.SLEEP_MODE) {
+            currentMode = com.example.safe_kids.services.blocking.AppMode.SLEEP_MODE
+            Log.d(TAG, "Sleep Mode restored from SharedPrefs")
+        }
         if (currentMode == com.example.safe_kids.services.blocking.AppMode.SLEEP_MODE) {
             if (!isAlwaysAllowed(packageName) && !isSystemApp(packageName)) {
                 Log.d(TAG, "Priority 2 - Sleep Mode blocking: $packageName")
@@ -1401,16 +1486,20 @@ class SafeKidsAccessibilityService : AccessibilityService() {
 
     private fun loadBlockedApps() {
         val currentUser = FirebaseAuth.getInstance().currentUser ?: return
-        
+
         serviceScope.launch {
             FirebaseFirestore.getInstance()
-                .collection(AuthConfig.APP_USAGE_LIMITS_COLLECTION)
+                .collection(AuthConfig.CHILD_PROFILES_COLLECTION)
                 .document(currentUser.uid)
                 .get()
                 .addOnSuccessListener { document ->
-                    val apps = document.get("blockedApps") as? List<String>
-                    if (apps != null) {
-                        blockedApps = apps.toSet()
+                    val restrictions = document.get("restrictions") as? List<Map<String, Any>>
+                    if (restrictions != null) {
+                        blockedApps = restrictions
+                            .filter { it["isBlocked"] == true }
+                            .mapNotNull { it["packageName"] as? String }
+                            .toSet()
+                        Log.d(TAG, "Loaded ${blockedApps.size} blocked apps from child_profiles")
                     }
                 }
         }

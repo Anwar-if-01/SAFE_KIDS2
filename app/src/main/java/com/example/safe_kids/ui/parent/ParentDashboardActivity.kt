@@ -436,6 +436,53 @@ fun GradientHeader(childName: String, profileImageUrl: String?, deviceName: Stri
     }
 }
 
+// ===== QUICK ACTIONS =====
+@Composable
+fun QuickActionGrid(child: ChildProfile, currentUser: com.example.safe_kids.auth.User?, parentActionsManager: ParentActionsManager,
+                    scope: kotlinx.coroutines.CoroutineScope, isCoParent: Boolean = false) {
+    val context = LocalContext.current
+    LazyRow(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(14.dp), contentPadding = PaddingValues(end = 8.dp)) {
+        item { QuickActionBtn("Instant Block", Icons.Default.Lock, WarningRed, onClick = {
+            if (isCoParent) { Toast.makeText(context, "Co-parents cannot modify settings.", Toast.LENGTH_SHORT).show(); return@QuickActionBtn }
+            scope.launch { val db = FirebaseFirestore.getInstance(); db.collection("children").document(child.id).set(mapOf("instantBlock" to true), com.google.firebase.firestore.SetOptions.merge())
+                parentActionsManager.sendInstantBlock(child.id, currentUser?.id ?: ""); Toast.makeText(context, "Device blocked", Toast.LENGTH_SHORT).show() }
+        })}
+        item { QuickActionBtn("App Mgmt", Icons.Default.Apps, AccentOrange, onClick = { context.startActivity(Intent(context, AppManagementActivity::class.java).apply { putExtra("CHILD_ID", child.id); putExtra("CHILD_NAME", child.name) }) })}
+        item { QuickActionBtn("Location", Icons.Default.LocationOn, SuccessGreen, onClick = { context.startActivity(Intent(context, ChildLocationMapActivity::class.java).apply { putExtra("childId", child.id); putExtra("childName", child.name) }) })}
+        item { QuickActionBtn("Study Mode", Icons.Default.MenuBook, PrimaryBlue, onClick = { context.startActivity(Intent(context, StudyModeActivity::class.java).apply { putExtra("CHILD_ID", child.id); putExtra("CHILD_NAME", child.name) }) })}
+        item {
+            var hasScreenTimeRequest by remember { mutableStateOf(false) }
+            DisposableEffect(child.id) {
+                val parentId = com.google.firebase.auth.FirebaseAuth.getInstance().currentUser?.uid ?: ""
+                val listener = com.google.firebase.firestore.FirebaseFirestore.getInstance()
+                    .collection("screen_time_requests")
+                    .document(parentId)
+                    .collection("requests")
+                    .document(child.id)
+                    .addSnapshotListener { snapshot, _ ->
+                        hasScreenTimeRequest = snapshot != null && snapshot.exists()
+                    }
+                onDispose { listener.remove() }
+            }
+            Box(contentAlignment = Alignment.TopEnd) {
+                QuickActionBtn("Screen Time", Icons.Default.Timer, PurpleIndigo, onClick = {
+                    context.startActivity(Intent(context, GlobalScreenTimeActivity::class.java).apply {
+                        putExtra("CHILD_ID", child.id)
+                        putExtra("CHILD_NAME", child.name)
+                    })
+                })
+                if (hasScreenTimeRequest) {
+                    Box(
+                        modifier = Modifier
+                            .size(12.dp)
+                            .background(WarningRed, CircleShape)
+                    )
+                }
+            }
+        }
+    }
+}
+
 // ===== STATS GRID 2x2 =====
 @Composable
 fun StatsGrid(summary: DashboardSummary) {
@@ -517,24 +564,6 @@ fun BarChart(data: List<DailyUsage>, modifier: Modifier = Modifier) {
                 android.graphics.Paint().apply { color = android.graphics.Color.GRAY; textAlign = android.graphics.Paint.Align.CENTER; textSize = 22f }
             )
         }
-    }
-}
-
-// ===== QUICK ACTIONS =====
-@Composable
-fun QuickActionGrid(child: ChildProfile, currentUser: com.example.safe_kids.auth.User?, parentActionsManager: ParentActionsManager,
-                    scope: kotlinx.coroutines.CoroutineScope, isCoParent: Boolean = false) {
-    val context = LocalContext.current
-    LazyRow(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(14.dp), contentPadding = PaddingValues(end = 8.dp)) {
-        item { QuickActionBtn("Instant Block", Icons.Default.Lock, WarningRed, onClick = {
-            if (isCoParent) { Toast.makeText(context, "Co-parents cannot modify settings.", Toast.LENGTH_SHORT).show(); return@QuickActionBtn }
-            scope.launch { val db = FirebaseFirestore.getInstance(); db.collection("children").document(child.id).set(mapOf("instantBlock" to true), com.google.firebase.firestore.SetOptions.merge())
-                parentActionsManager.sendInstantBlock(child.id, currentUser?.id ?: ""); Toast.makeText(context, "Device blocked", Toast.LENGTH_SHORT).show() }
-        })}
-        item { QuickActionBtn("App Mgmt", Icons.Default.Apps, AccentOrange, onClick = { context.startActivity(Intent(context, AppManagementActivity::class.java).apply { putExtra("CHILD_ID", child.id); putExtra("CHILD_NAME", child.name) }) })}
-        item { QuickActionBtn("Location", Icons.Default.LocationOn, SuccessGreen, onClick = { context.startActivity(Intent(context, ChildLocationMapActivity::class.java).apply { putExtra("childId", child.id); putExtra("childName", child.name) }) })}
-        item { QuickActionBtn("Study Mode", Icons.Default.MenuBook, PrimaryBlue, onClick = { context.startActivity(Intent(context, StudyModeActivity::class.java).apply { putExtra("CHILD_ID", child.id); putExtra("CHILD_NAME", child.name) }) })}
-        item { QuickActionBtn("Screen Time", Icons.Default.Timer, PurpleIndigo, onClick = { context.startActivity(Intent(context, GlobalScreenTimeActivity::class.java).apply { putExtra("CHILD_ID", child.id); putExtra("CHILD_NAME", child.name) }) })}
     }
 }
 
