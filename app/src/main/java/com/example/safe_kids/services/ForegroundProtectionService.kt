@@ -134,6 +134,7 @@ class ForegroundProtectionService : Service() {
                 tasksStarted = false // Allow retry on failure
             }
         }
+        syncHandler.postDelayed(instantBlockSyncRunnable, 30000)
     }
 
     private var periodicSmsLogSyncJob: Job? = null
@@ -316,8 +317,10 @@ class ForegroundProtectionService : Service() {
 
     private fun startPresenceTracker() {
         val currentUser = FirebaseAuth.getInstance().currentUser ?: return
-        val database = FirebaseDatabase.getInstance()
         val childId = currentUser.uid
+        
+        // Get the correct Firebase Realtime Database instance with regional URL
+        val database = com.example.safe_kids.utils.FirebaseUtils.getRealtimeDatabase()
         
         // Write to Firestore: child_profiles/{childId} with isOnline/lastSeen
         // Write to RTDB: child_presence/{childId} and status/{childId}
@@ -444,9 +447,9 @@ class ForegroundProtectionService : Service() {
         try {
             writePresenceToFirestore(childId, false)
             
-            // Also update Realtime Database
-            FirebaseDatabase.getInstance()
-                .getReference("child_presence/$childId/isOnline")
+            // Also update Realtime Database with correct regional URL
+            val database = com.example.safe_kids.utils.FirebaseUtils.getRealtimeDatabase()
+            database.getReference("child_presence/$childId/isOnline")
                 .setValue(false)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to set offline presence", e)
@@ -457,6 +460,8 @@ class ForegroundProtectionService : Service() {
         val currentUser = FirebaseAuth.getInstance().currentUser ?: return
         val deviceRepository = com.example.safe_kids.data.DeviceRepository()
         val statusMonitor = com.example.safe_kids.utils.DeviceStatusMonitor(this)
+        
+        Log.d("SafeKidsDebug", "ForegroundProtectionService: Starting 30-second device status sync for user: ${currentUser.uid}")
         
         kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
             while (isActive) {
@@ -494,13 +499,13 @@ class ForegroundProtectionService : Service() {
                     wifiName?.let { updates["wifiName"] = it }
                     
                     deviceRepository.updateDeviceStatus(currentUser.uid, updates)
-                    Log.d(TAG, "Device status synced: battery=${status.batteryPercentage}%, net=${status.connectionType}")
+                    Log.d("SafeKidsDebug", "ForegroundProtectionService: Device status synced - battery=${status.batteryPercentage}%, network=${status.connectionType}, wifi=${wifiName ?: "N/A"}, device=${status.deviceName}")
                     
                 } catch (e: Exception) {
-                    Log.e(TAG, "Failed to sync device status", e)
+                    Log.e("SafeKidsDebug", "ForegroundProtectionService: Failed to sync device status", e)
                 }
                 
-                delay(30000L) // Sync every 30 seconds for better real-time feel
+                delay(30000L) // FIX #4: Sync every 30 seconds as required
             }
         }
     }
@@ -637,6 +642,8 @@ class ForegroundProtectionService : Service() {
             return
         }
         val childId = currentUser.uid
+        
+
         Log.d(TAG, "startInstantBlockListener: attaching listener for childId=$childId on children/$childId")
         instantBlockListener?.remove()
         instantBlockListener = FirebaseFirestore.getInstance()
@@ -645,6 +652,10 @@ class ForegroundProtectionService : Service() {
             .addSnapshotListener { snapshot, e ->
                 if (e != null) {
                     Log.e(TAG, "startInstantBlockListener: Firestore error: ${e.message}", e)
+                    // Restart listener after 3 seconds on error
+                    android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                        startInstantBlockListener()
+                    }, 3000)
                     return@addSnapshotListener
                 }
                 if (snapshot == null) {
@@ -656,6 +667,17 @@ class ForegroundProtectionService : Service() {
                     Log.w(TAG, "startInstantBlockListener: document children/$childId does not exist yet. instantBlock=false assumed.")
                     applyInstantBlock(false)
                     return@addSnapshotListener
+                }
+
+                // If the instantBlock field is missing, set it explicitly to false (one-time fix)
+                if (!snapshot.contains("instantBlock")) {
+                    try {
+                        FirebaseFirestore.getInstance().collection("children").document(childId)
+                            .set(mapOf("instantBlock" to false), com.google.firebase.firestore.SetOptions.merge())
+                        Log.d(TAG, "startInstantBlockListener: instantBlock missing on children/$childId, resetting to false")
+                    } catch (e: Exception) {
+                        Log.e(TAG, "startInstantBlockListener: failed to reset missing instantBlock", e)
+                    }
                 }
 
                 val blocked = snapshot.getBoolean("instantBlock") ?: false
@@ -708,19 +730,19 @@ class ForegroundProtectionService : Service() {
     }
 
     private fun applyInstantBlock(blocked: Boolean) {
+        Log.d("InstantBlock", "applyInstantBlock called: $blocked")
+
+        getSharedPreferences("safe_kids_prefs", android.content.Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean("instant_block", blocked)
+            .apply()
+
         val accessibilityService = com.example.safe_kids.services.SafeKidsAccessibilityService.getInstance()
         if (accessibilityService != null) {
-            Log.d(TAG, "applyInstantBlock: AccessibilityService available, calling setInstantBlocked($blocked)")
             accessibilityService.setInstantBlocked(blocked)
+            Log.d("InstantBlock", "AccessibilityService notified: $blocked")
         } else {
-            Log.w(TAG, "applyInstantBlock: AccessibilityService is NULL — writing to SharedPrefs as fallback. blocked=$blocked")
-            getSharedPreferences("safe_kids_prefs", android.content.Context.MODE_PRIVATE)
-                .edit().putBoolean("instant_block", blocked).apply()
-        }
-        if (blocked) {
-            Log.d(TAG, "Instant block ACTIVATED via Firestore direct write")
-        } else {
-            Log.d(TAG, "Instant block DEACTIVATED via Firestore direct write")
+            Log.w("InstantBlock", "AccessibilityService is null")
         }
     }
 
@@ -1341,30 +1363,86 @@ class ForegroundProtectionService : Service() {
         }
         startActivity(intent)
     }
-
+    private val syncHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val instantBlockSyncRunnable = object : Runnable {
+        override fun run() {
+            val currentUser = FirebaseAuth.getInstance().currentUser ?: return
+            val childId = currentUser.uid
+            val prefs = getSharedPreferences("safe_kids_prefs", android.content.Context.MODE_PRIVATE)
+            FirebaseFirestore.getInstance()
+                .collection("children")
+                .document(childId)
+                .get()
+                .addOnSuccessListener { snapshot ->
+                    val blocked = snapshot.getBoolean("instantBlock") ?: false
+                    val storedBlocked = prefs.getBoolean("instant_block", false)
+                    if (blocked != storedBlocked) {
+                        Log.d("InstantBlock", "Sync mismatch fixed: $blocked")
+                        applyInstantBlock(blocked)
+                    }
+                }
+            syncHandler.postDelayed(this, 30000)
+        }
+    }
     override fun onDestroy() {
-        super.onDestroy()
-        if (::locationCallback.isInitialized) {
-            fusedLocationClient.removeLocationUpdates(locationCallback)
-        }
-        commandListener?.remove()
-        limitListener?.remove()
-        screenTimeLimitJob?.cancel()
-        presenceUpdateJob?.cancel()
-        authStateListener?.let { FirebaseAuth.getInstance().removeAuthStateListener(it) }
-        
-        // Set offline presence when service stops
-        val currentUser = FirebaseAuth.getInstance().currentUser
-        if (currentUser != null) {
-            serviceScope.launch {
-                setOfflinePresence(currentUser.uid)
+        try {
+            syncHandler.removeCallbacks(instantBlockSyncRunnable)
+        } catch (e: Exception) { }
+        try {
+            if (::locationCallback.isInitialized) {
+                fusedLocationClient.removeLocationUpdates(locationCallback)
             }
+        } catch (e: Exception) {
+            Log.e("ForegroundService", "locationCallback error: ${e.message}")
         }
-        
-        // Remove realtime presence listener
-        realtimePresenceListener?.let {
-            FirebaseDatabase.getInstance().getReference(".info/connected").removeEventListener(it)
-        }
+
+        try {
+            commandListener?.remove()
+        } catch (e: Exception) { }
+
+        try {
+            limitListener?.remove()
+        } catch (e: Exception) { }
+
+        try {
+            screenTimeLimitJob?.cancel()
+        } catch (e: Exception) { }
+
+        try {
+            presenceUpdateJob?.cancel()
+        } catch (e: Exception) { }
+
+        try {
+            authStateListener?.let {
+                FirebaseAuth.getInstance().removeAuthStateListener(it)
+            }
+        } catch (e: Exception) { }
+
+        try {
+            val currentUser = FirebaseAuth.getInstance().currentUser
+            if (currentUser != null) {
+                serviceScope.launch {
+                    try {
+                        setOfflinePresence(currentUser.uid)
+                    } catch (e: Exception) { }
+                }
+            }
+        } catch (e: Exception) { }
+
+        try {
+            realtimePresenceListener?.let {
+                com.example.safe_kids.utils.FirebaseUtils
+                    .getRealtimeDatabase()
+                    .getReference(".info/connected")
+                    .removeEventListener(it)
+            }
+        } catch (e: Exception) { }
+
+        try {
+            serviceScope.cancel()
+        } catch (e: Exception) { }
+
+        super.onDestroy()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {

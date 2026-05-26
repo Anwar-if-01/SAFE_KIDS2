@@ -1,6 +1,7 @@
 {
   "project_info": {
     "project_number": "767296457950",
+    "firebase_url": "https://safe-kids-cf8a6-default-rtdb.europe-west1.firebasedatabase.app",
     "project_id": "safe-kids-cf8a6",
     "storage_bucket": "safe-kids-cf8a6.firebasestorage.app"
   },
@@ -19,6 +20,14 @@
           "android_info": {
             "package_name": "com.example.safe_kids",
             "certificate_hash": "bad980924f9e8f6dbbb63d727490ef78c6912aae"
+          }
+        },
+        {
+          "client_id": "767296457950-omtig53j80bkp23kods4f8mk0g7idnni.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.example.safe_kids",
+            "certificate_hash": "e8d52e15d1b150b1cc3be71edb518a8db3136a70"
           }
         },
         {

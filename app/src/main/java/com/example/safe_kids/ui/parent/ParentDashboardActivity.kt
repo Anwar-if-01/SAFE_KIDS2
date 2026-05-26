@@ -811,17 +811,15 @@ fun LocationTab(child: ChildProfile?, viewModel: ParentDashboardViewModel, locat
     val childLocationData by viewModel.childLocation.collectAsState(); val isOffline by viewModel.isChildOffline.collectAsState()
     val childLocation = remember(childLocationData) { childLocationData?.let { com.google.android.gms.maps.model.LatLng(it.latitude, it.longitude) } }
     Box(modifier = Modifier.fillMaxSize()) {
-        if (childLocation != null) {
-            val cameraPositionState = rememberCameraPositionState { position = com.google.android.gms.maps.model.CameraPosition.fromLatLngZoom(childLocation, 15f) }
-            LaunchedEffect(childLocation) { cameraPositionState.animate(com.google.android.gms.maps.CameraUpdateFactory.newLatLng(childLocation), 1000) }
-            GoogleMap(modifier = Modifier.fillMaxSize(), cameraPositionState = cameraPositionState, uiSettings = MapUiSettings(zoomControlsEnabled = false)) {
-                Marker(state = MarkerState(position = childLocation), title = child.name, snippet = if (isOffline) "Last seen" else "Online", alpha = if (isOffline) 0.6f else 1.0f)
+        val safeLocation = childLocation ?: com.google.android.gms.maps.model.LatLng(9.0, 38.7)
+        val cameraPositionState = rememberCameraPositionState { position = com.google.android.gms.maps.model.CameraPosition.fromLatLngZoom(safeLocation, if (childLocation != null) 15f else 10f) }
+        LaunchedEffect(childLocation) { if (childLocation != null) cameraPositionState.animate(com.google.android.gms.maps.CameraUpdateFactory.newLatLng(childLocation), 1000) }
+        
+        GoogleMap(modifier = Modifier.fillMaxSize(), cameraPositionState = cameraPositionState, uiSettings = MapUiSettings(zoomControlsEnabled = false)) {
+                if (childLocation != null) {
+                    Marker(state = MarkerState(position = childLocation), title = child.name, snippet = if (isOffline) "Last seen" else "Online", alpha = if (isOffline) 0.6f else 1.0f)
+                }
             }
-        } else {
-            Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surfaceVariant), contentAlignment = Alignment.Center) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) { CircularProgressIndicator(); Spacer(Modifier.height(16.dp)); Text("Searching for location...") }
-            }
-        }
         Card(modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(16.dp).padding(bottom = 8.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface), shape = RoundedCornerShape(16.dp), elevation = CardDefaults.cardElevation(4.dp)) {
             Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
                 Box(modifier = Modifier.size(40.dp)) {
@@ -852,7 +850,7 @@ fun FamilyTab(children: List<ChildProfile>, onAddChild: () -> Unit) {
     }
     LaunchedEffect(children) {
         children.forEach { child ->
-            val presenceRef = com.google.firebase.database.FirebaseDatabase.getInstance().getReference("child_presence/${child.id}")
+            val presenceRef = com.example.safe_kids.utils.FirebaseUtils.getRealtimeDatabase().getReference("child_presence/${child.id}")
             val listener = object : com.google.firebase.database.ValueEventListener {
                 override fun onDataChange(snapshot: com.google.firebase.database.DataSnapshot) {
                     val lastSeen = snapshot.child("lastSeen").getValue(Long::class.java) ?: 0L

@@ -44,22 +44,9 @@ class AdminCodeViewModel(private val authManager: AuthManager) : ViewModel() {
         }
     }
 
-    /** Save PIN to parent's user doc AND to each linked child's document so child device can read it. */
+    /** Save PIN to parent's user doc ONLY as per bug fix instructions. */
     private suspend fun savePinToChildren(pin: String) {
-        try {
-            val user = authManager.getCurrentUser() ?: return
-            val db = FirebaseFirestore.getInstance()
-            val childIds = user.childIds
-            if (childIds.isEmpty()) return
-            val pinValue = if (pin.isEmpty()) null else pin
-            for (childId in childIds) {
-                db.collection("children").document(childId)
-                    .set(mapOf("parentalPin" to pinValue), SetOptions.merge())
-                    .await()
-            }
-        } catch (e: Exception) {
-            android.util.Log.e("AdminCodeViewModel", "Failed to save PIN to children", e)
-        }
+        // Obsolete: We now rely on child reading from users/{parentId}/parentalPin
     }
 
     fun setAdminCode(code: String) {

@@ -28,13 +28,14 @@
     <uses-permission android:name="android.permission.USE_BIOMETRIC" />
     <uses-permission android:name="android.permission.USE_FINGERPRINT" />
     <uses-permission android:name="android.permission.VIBRATE" />
-    <uses-permission android:name="android.permission.BIND_ACCESSIBILITY_SERVICE" />
-    <uses-permission android:name="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE" />
+    <uses-permission android:name="android.permission.BIND_ACCESSIBILITY_SERVICE" tools:ignore="ProtectedPermissions" />
+    <uses-permission android:name="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE" tools:ignore="ProtectedPermissions" />
     
     <!-- Hardware features (optional) -->
     <uses-feature android:name="android.hardware.camera" android:required="false" />
     <uses-feature android:name="android.hardware.location.gps" android:required="false" />
     <uses-feature android:name="android.hardware.fingerprint" android:required="false" />
+    <uses-feature android:name="android.hardware.telephony" android:required="false" />
 
     <application
         android:allowBackup="true"
@@ -45,7 +46,6 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.SAFE_KIDS">
-        
         <!-- Authentication Activity -->
         <activity
             android:name=".ui.auth.AuthActivity"
@@ -149,6 +149,13 @@
         <!-- Required Permissions Activity -->
         <activity
             android:name=".ui.parent.RequiredPermissionsActivity"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize"
+            android:theme="@style/Theme.SAFE_KIDS" />
+
+        <!-- Required Permissions Activity (Child) -->
+        <activity
+            android:name=".ui.child.RequiredPermissionsActivity"
             android:exported="false"
             android:windowSoftInputMode="adjustResize"
             android:theme="@style/Theme.SAFE_KIDS" />
@@ -279,12 +286,12 @@
             android:theme="@style/Theme.SAFE_KIDS"
             android:launchMode="singleTop" />
 
-        <!-- Admin Dashboard Activity -->
-        <activity
+        <!-- Admin Dashboard Activity - DISABLED: Class not found -->
+        <!-- <activity
             android:name=".ui.admin.AdminDashboardActivity"
             android:exported="false"
             android:windowSoftInputMode="adjustResize"
-            android:theme="@style/Theme.SAFE_KIDS" />
+            android:theme="@style/Theme.SAFE_KIDS" /> -->
 
         <!-- Uninstall Protection Activity -->
         <activity
@@ -424,6 +431,10 @@
     android:name=".ui.parent.AddChildPairingActivity"
     android:exported="false"
     android:windowSoftInputMode="adjustResize"
+    android:theme="@style/Theme.SAFE_KIDS" />
+<activity
+    android:name=".ui.child.PermissionSetupActivity"
+    android:exported="false"
     android:theme="@style/Theme.SAFE_KIDS" />
 </application>
 

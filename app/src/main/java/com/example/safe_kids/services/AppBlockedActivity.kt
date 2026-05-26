@@ -62,7 +62,7 @@ class AppBlockedActivity : ComponentActivity() {
                                 return@addSnapshotListener
                             }
                             
-                            val instantBlock = snapshot.getBoolean("instantBlock") ?: true
+                            val instantBlock = snapshot.getBoolean("instantBlock") ?: false
                             val isEnabled = snapshot.getBoolean("enabled") ?: true
                             
                             // If instantBlock is false or limit is disabled, dismiss

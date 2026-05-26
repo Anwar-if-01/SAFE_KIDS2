@@ -188,13 +188,19 @@ class SafeKidsAccessibilityService : AccessibilityService() {
 
     /** Called by ForegroundProtectionService when Firestore `children/{id}/instantBlock` changes. */
     fun setInstantBlocked(blocked: Boolean) {
-        Log.d(TAG, "setInstantBlocked($blocked) called on AccessibilityService")
         isInstantBlocked = blocked
-        // Keep SharedPrefs in sync so the fallback path stays consistent
+        Log.d("InstantBlock", "setInstantBlocked: $blocked")
+
         getSharedPreferences("safe_kids_prefs", android.content.Context.MODE_PRIVATE)
-            .edit().putBoolean("instant_block", blocked).apply()
+            .edit()
+            .putBoolean("instant_block", blocked)
+            .apply()
+
         if (blocked) {
             performGlobalAction(GLOBAL_ACTION_HOME)
+            Log.d("InstantBlock", "Kicked to home screen")
+        } else {
+            Log.d("InstantBlock", "Block released - normal mode")
         }
     }
 
@@ -230,6 +236,9 @@ class SafeKidsAccessibilityService : AccessibilityService() {
                 loadBlockedApps()
                 loadAppCategories()
                 startCommandListener()
+                startInstantBlockListener()
+// Instant Block Firestore listener
+
                 registerPackageReceiver()
                 syncInstalledAppsWithFirestore()
                 startRestrictionListener()
@@ -356,6 +365,35 @@ class SafeKidsAccessibilityService : AccessibilityService() {
                     }
                 }
             }
+    }
+
+    private var instantBlockListener: ListenerRegistration? = null
+
+    private fun startInstantBlockListener() {
+        val currentUser = FirebaseAuth.getInstance().currentUser ?: return
+        val childId = currentUser.uid
+
+        Log.d(TAG, "Starting instantBlock listener for child: $childId")
+
+        instantBlockListener?.remove()
+
+        // Must run on main thread for Firestore snapshot listeners
+        serviceScope.launch(Dispatchers.Main) {
+            instantBlockListener = FirebaseFirestore.getInstance()
+                .collection("children")
+                .document(childId)
+                .addSnapshotListener { snapshot, e ->
+                    if (e != null) {
+                        Log.w(TAG, "Listen failed for instantBlock.", e)
+                        return@addSnapshotListener
+                    }
+                    if (snapshot != null && snapshot.exists()) {
+                        val blocked = snapshot.getBoolean("instantBlock") ?: false
+                        Log.d("InstantBlock", "Snapshot received: instantBlock=$blocked")
+                        setInstantBlocked(blocked)
+                    }
+                }
+        }
     }
 
     private fun loadAppCategories() {
@@ -522,15 +560,28 @@ class SafeKidsAccessibilityService : AccessibilityService() {
     }
 
     override fun onDestroy() {
-        super.onDestroy()
+        try { instantBlockListener?.remove(); instantBlockListener = null } catch (e: Exception) { }
+        try { commandListener?.remove() } catch (e: Exception) { }
         instance = null
         isMonitoringEnabled = false
-        commandListener?.remove()
+        super.onDestroy()
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (!isMonitoringEnabled || event == null) return
-        
+
+        // INSTANT BLOCK CHECK - Priority 1
+        val packageName = event.packageName?.toString() ?: return
+        val prefs = getSharedPreferences("safe_kids_prefs", MODE_PRIVATE)
+        val spBlocked = prefs.getBoolean("instant_block", false)
+        if (isInstantBlocked || spBlocked) {
+            if (!isSystemApp(packageName)) {
+                Log.d("InstantBlock", "Blocking app: $packageName")
+                performGlobalAction(GLOBAL_ACTION_HOME)
+                return
+            }
+        }
+
         when (event.eventType) {
             AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> {
                 handleWindowStateChanged(event)
@@ -551,31 +602,35 @@ class SafeKidsAccessibilityService : AccessibilityService() {
         // Anti-Uninstall & Protection Check
         if (checkUninstallAttempt(event)) return
 
+        // INSTANT BLOCK — runs even if protection is disabled
+        val prefs = getSharedPreferences("safe_kids_prefs", MODE_PRIVATE)
+        val spBlocked = prefs.getBoolean("instant_block", false)
+        if (isInstantBlocked) {
+            if (!isSystemApp(packageName)) {
+                Log.d("InstantBlock", "handleWindowStateChanged blocking: $packageName")
+                performGlobalAction(GLOBAL_ACTION_HOME)
+                return
+            }
+        }
+
         // Protection master switch
         if (!isProtectionEnabled) {
             logAppUsage(packageName)
             return
         }
 
-        // Sync isInstantBlocked from SharedPrefs fallback in case ForegroundProtectionService
-        // wrote it there when this service wasn't running yet
-        if (!isInstantBlocked) {
-            val sharedPrefsBlocked = getSharedPreferences("safe_kids_prefs", android.content.Context.MODE_PRIVATE)
-                .getBoolean("instant_block", false)
-            if (sharedPrefsBlocked) {
-                Log.d(TAG, "handleWindowStateChanged: isInstantBlocked synced from SharedPrefs fallback = true")
-                isInstantBlocked = true
-            }
-        }
+
 
         // Priority 0: Global Screen Time Lockout
-        if (com.example.safe_kids.services.ForegroundProtectionService.isGlobalLockoutActive && 
-            packageName != "com.example.safe_kids" && 
-            packageName != "com.android.dialer" && 
+        if (com.example.safe_kids.services.ForegroundProtectionService.isGlobalLockoutActive &&
+            packageName != "com.example.safe_kids" &&
+            packageName != "com.android.dialer" &&
             packageName != "com.google.android.dialer") {
-            
-            Log.d(TAG, "Global lockout active. Blocking app: $packageName")
-            val intent = Intent(this, com.example.safe_kids.ui.child.TotalLockoutActivity::class.java).apply {
+            Log.d(TAG, "Global lockout active. Blocking: $packageName")
+            val intent = Intent(
+                this,
+                com.example.safe_kids.ui.child.TotalLockoutActivity::class.java
+            ).apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
             }
             startActivity(intent)
@@ -584,16 +639,13 @@ class SafeKidsAccessibilityService : AccessibilityService() {
 
         // --- Usage Tracking ---
         if (packageName != lastForegroundApp) {
-            // Ensure any previous blocking overlay is removed when apps switch
             dismissBlockingOverlay()
-            // App swapped, save usage for the old app to Room
             val now = System.currentTimeMillis()
             lastForegroundApp?.let { oldPkg ->
                 val duration = now - lastAppStartTime
                 if (duration > 0) {
                     serviceScope.launch {
                         usageRepository.recordUsage(oldPkg, duration)
-                        // After recording usage, evaluate per-app limits and enforce if exceeded
                         screenTimeChecker.checkAndEnforce(oldPkg)
                     }
                 }
@@ -604,25 +656,54 @@ class SafeKidsAccessibilityService : AccessibilityService() {
 
         // Priority 1: Instant Block
         if (isInstantBlocked && !isSystemApp(packageName)) {
-            blockCurrentApp(packageName)
-            return
-        }
-        
-        // Priority 2: Downtime (Schedule-based)
-        val isStudyWhitelisted = appBlockingService.getCurrentMode() == com.example.safe_kids.services.blocking.AppMode.STUDY_MODE && !appBlockingService.isAppBlocked(packageName)
-        
-        if (downtimeConfig.isEnabled && isDowntimeActive() && !isAlwaysAllowed(packageName) && !isStudyWhitelisted) {
-            Log.d(TAG, "Blocking app due to Downtime: $packageName")
+            Log.d(TAG, "Priority 1 - Instant Block blocking: $packageName")
             blockCurrentApp(packageName)
             return
         }
 
-        // Priority 3: App Restrictions (Limits & Manual Blocks)
-        if (isAppBlocked(packageName)) {
+        // Priority 2: Sleep Mode
+        if (currentMode == com.example.safe_kids.services.blocking.AppMode.SLEEP_MODE) {
+            if (!isAlwaysAllowed(packageName) && !isSystemApp(packageName)) {
+                Log.d(TAG, "Priority 2 - Sleep Mode blocking: $packageName")
+                blockCurrentApp(packageName)
+                return
+            }
+        }
+
+        // Priority 3: Study Mode
+        if (studyModeActive) {
+            if (!isSystemApp(packageName) &&
+                !isWhitelisted(packageName) &&
+                !isAlwaysAllowed(packageName)) {
+                Log.d(TAG, "Priority 3 - Study Mode blocking: $packageName")
+                logStudyBlockedAttempt(packageName)
+                blockCurrentApp(packageName)
+                return
+            }
+        }
+
+        // Priority 4: Always Allowed — never block these
+        if (isAlwaysAllowed(packageName)) {
+            logAppUsage(packageName)
+            return
+        }
+
+        // Priority 5: App Blocker (manual blocked apps)
+        // isSystemApp guard prevents launcher/system apps from being blocked
+        if (blockedApps.contains(packageName) && !isSystemApp(packageName)) {
+            Log.d(TAG, "Priority 5 - App Blocker blocking: $packageName")
             blockCurrentApp(packageName)
             return
         }
-        
+
+        // Priority 6: App Limits (time-based)
+        // isSystemApp guard prevents launcher/system apps from being blocked
+        if (!isSystemApp(packageName) && isAppBlocked(packageName)) {
+            Log.d(TAG, "Priority 6 - App Limit reached blocking: $packageName")
+            blockCurrentApp(packageName)
+            return
+        }
+
         // Log app usage for reporting
         logAppUsage(packageName)
     }
@@ -747,58 +828,46 @@ class SafeKidsAccessibilityService : AccessibilityService() {
         // Only enforce blocking when protection is enabled
         if (!isProtectionEnabled) return false
 
-        // Aggressive package installer blocking (now handled by checkUninstallAttempt)
-        /*
-        if (packageName == "com.google.android.packageinstaller" ||
-            packageName == "com.android.permissioncontroller" ||
-            packageName == "com.android.packageinstaller") {
-            sendEmergencyNotification()
-            return true
-        }
-        */
+        // System apps and launchers are never blocked
+        if (isSystemApp(packageName)) return false
 
-        if (isInstantBlocked) return !isSystemApp(packageName)
+        // Always allowed apps are never blocked
+        if (isAlwaysAllowed(packageName)) return false
 
-        // App Restrictions (Limits & Manual Blocks)
-        val restriction = appRestrictions.find { it.packageName == packageName }
-        
-        // Final source of truth: Dynamic blockedApps list (from RestrictionRepository/Room)
+        // Instant block check
+        if (isInstantBlocked) return true
+
+        // Manual blocked apps from App Blocker
         if (blockedApps.contains(packageName)) return true
-        
+
+        // App Limits (time-based restrictions)
+        val restriction = appRestrictions.find { it.packageName == packageName }
         if (restriction != null) {
+            // Manual block
             if (restriction.isBlocked) return true
-            
+
+            // Time limit check
             val limitMs = restriction.timeLimit ?: 0L
             if (limitMs > 0) {
-                // Calculate used time
                 val usedMs = if (restriction.limitType == "TOTAL") {
-                    // Shared limit across apps with same remark
                     appRestrictions
-                        .filter { it.limitType == "TOTAL" && it.remark == restriction.remark }
+                        .filter {
+                            it.limitType == "TOTAL" &&
+                                    it.remark == restriction.remark
+                        }
                         .sumOf { appUsageToday[it.packageName] ?: 0L }
                 } else {
                     appUsageToday[packageName] ?: 0L
                 }
-                
-                if (usedMs >= limitMs) return true
+                if (usedMs >= limitMs) {
+                    Log.d(TAG, "isAppBlocked: time limit reached for $packageName " +
+                            "used=${usedMs}ms limit=${limitMs}ms")
+                    return true
+                }
             }
         }
 
-        return when (currentMode) {
-            com.example.safe_kids.services.blocking.AppMode.SLEEP_MODE -> {
-                val category = appCategories[packageName]
-                category != com.example.safe_kids.data.AppCategory.EMERGENCY && 
-                category != com.example.safe_kids.data.AppCategory.SYSTEM &&
-                !isSystemApp(packageName)
-            }
-            com.example.safe_kids.services.blocking.AppMode.STUDY_MODE -> {
-                val category = appCategories[packageName]
-                category != com.example.safe_kids.data.AppCategory.EDUCATIONAL && 
-                category != com.example.safe_kids.data.AppCategory.SYSTEM &&
-                !isSystemApp(packageName)
-            }
-            else -> blockedApps.contains(packageName)
-        }
+        return false
     }
 
     private fun isEmergencyApp(packageName: String): Boolean {

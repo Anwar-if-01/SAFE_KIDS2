@@ -74,21 +74,30 @@ fun AppManagementScreen(childId: String, childName: String, onBack: () -> Unit) 
                             }
 
                         }
-                        val downtimeData = snapshot.get("downtimeConfig") as? Map<String, Any>
-                        alwaysAllowedApps = downtimeData?.get("alwaysAllowedApps") as? List<String> ?: emptyList()
-                        val restrictionsData = snapshot.get("restrictions") as? List<Map<String, Any>>
-                        if (restrictionsData != null) {
-                            appRestrictions = restrictionsData.map {
-                                com.example.safe_kids.data.AppRestriction(
-                                    packageName = it["packageName"] as? String ?: "",
-                                    appName = it["appName"] as? String ?: "",
-                                    isBlocked = it["isBlocked"] as? Boolean ?: false,
-                                    timeLimit = it["timeLimit"] as? Long,
-                                    limitType = it["limitType"] as? String ?: "INDIVIDUAL",
-                                    remark = it["remark"] as? String
-                                )
-                            }
+                        // installedApps comes from child profile; allowed/blocked apps come from centralized app_usage_limits
+                        android.util.Log.d("AppManagement", "Read installedApps from ${AuthConfig.CHILD_PROFILES_COLLECTION}/$childId")
+                    }
+                }
+            // Listen for allowed and blocked apps in app_usage_limits collection
+            db.collection(AuthConfig.APP_USAGE_LIMITS_COLLECTION).document(childId)
+                .addSnapshotListener { snapshot, e ->
+                    if (e != null) {
+                        android.util.Log.e("AppManagement", "Failed to listen app_usage_limits/$childId", e)
+                        alwaysAllowedApps = emptyList()
+                        appRestrictions = emptyList()
+                        return@addSnapshotListener
+                    }
+                    if (snapshot != null && snapshot.exists()) {
+                        android.util.Log.d("AppManagement", "Read app_usage_limits/$childId: ${snapshot.data}")
+                        alwaysAllowedApps = snapshot.get("alwaysAllowedApps") as? List<String> ?: emptyList()
+                        val blocked = snapshot.get("blockedApps") as? List<String> ?: emptyList()
+                        appRestrictions = blocked.map { pkg ->
+                            val appName = installedApps.find { it.packageName == pkg }?.appName ?: pkg
+                            com.example.safe_kids.data.AppRestriction(packageName = pkg, appName = appName, isBlocked = true, timeLimit = null, limitType = "INDIVIDUAL", geofenceId = null)
                         }
+                    } else {
+                        alwaysAllowedApps = emptyList()
+                        appRestrictions = emptyList()
                     }
                 }
         }
@@ -182,18 +191,10 @@ fun AppManagementScreen(childId: String, childName: String, onBack: () -> Unit) 
                 )
                 ManagementCard {
                     Column {
-                        // Safe Kids always shown, not removable
-                        AppManagementItem(name = "Safe Kids", packageName = "com.example.safe_kids", installedApps = installedApps, subtitle = "Always allowed", onRemove = null)
-                        HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp), thickness = 0.5.dp, color = Color.LightGray.copy(alpha = 0.3f))
-
-                        val userAllowed = alwaysAllowedApps.filter { it != "com.example.safe_kids" }
-                        if (userAllowed.isEmpty()) {
-                            // Default system apps shown as non-removable
-                            AppManagementItem(name = "Phone", packageName = "com.android.dialer", installedApps = installedApps, subtitle = "System default", onRemove = null)
-                            HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp), thickness = 0.5.dp, color = Color.LightGray.copy(alpha = 0.3f))
-                            AppManagementItem(name = "Clock", packageName = "com.android.deskclock", installedApps = installedApps, subtitle = "System default", onRemove = null)
+                        if (alwaysAllowedApps.isEmpty()) {
+                            EmptySectionState(icon = Icons.Default.CheckCircle, text = "No apps have been approved yet")
                         } else {
-                            userAllowed.forEachIndexed { index, pkg ->
+                            alwaysAllowedApps.forEachIndexed { index, pkg ->
                                 val appName = installedApps.find { it.packageName == pkg }?.appName ?: pkg
                                 AppManagementItem(
                                     name = appName,
@@ -201,24 +202,20 @@ fun AppManagementScreen(childId: String, childName: String, onBack: () -> Unit) 
                                     installedApps = installedApps,
                                     onRemove = {
                                         scope.launch {
-                                            val profileRef = db.collection(AuthConfig.CHILD_PROFILES_COLLECTION).document(childId)
-                                            val snapshot = profileRef.get().await()
-                                            val downtimeMap = snapshot.get("downtimeConfig") as? Map<String, Any> ?: emptyMap()
-                                            val current = downtimeMap["alwaysAllowedApps"] as? List<String> ?: emptyList()
+                                            val limitsRef = db.collection(AuthConfig.APP_USAGE_LIMITS_COLLECTION).document(childId)
+                                            val snapshot = limitsRef.get().await()
+                                            val current = snapshot.get("alwaysAllowedApps") as? List<String> ?: emptyList()
                                             val updated = current.filter { it != pkg }
-                                            profileRef.set(
-                                                mapOf("downtimeConfig" to mapOf("alwaysAllowedApps" to updated)),
-                                                com.google.firebase.firestore.SetOptions.merge()
-                                            ).await()
+                                            limitsRef.set(mapOf("alwaysAllowedApps" to updated), com.google.firebase.firestore.SetOptions.merge()).await()
+                                            android.util.Log.d("AppManagement", "Wrote app_usage_limits/$childId alwaysAllowedApps: $updated")
                                         }
                                     }
                                 )
-                                if (index < userAllowed.size - 1) {
+                                if (index < alwaysAllowedApps.size - 1) {
                                     HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp), thickness = 0.5.dp, color = Color.LightGray.copy(alpha = 0.3f))
                                 }
                             }
                         }
-
                     }
                 }
                 Spacer(Modifier.height(8.dp))
@@ -267,52 +264,36 @@ fun AppManagementScreen(childId: String, childName: String, onBack: () -> Unit) 
         }
 
 
-        if (showAddAppsSheet) {
+                if (showAddAppsSheet) {
             AddAppsSheet(
                 installedApps = installedApps,
                 onDismiss = { showAddAppsSheet = false },
                 onConfirm = { selectedApps ->
                     scope.launch {
-                        val profileRef = db.collection(AuthConfig.CHILD_PROFILES_COLLECTION).document(childId)
-                        if (appsSelectionType == "ALLOWED") {
-                            val snapshot = profileRef.get().await()
-                            val downtimeMap = snapshot.get("downtimeConfig") as? Map<String, Any> ?: emptyMap()
-                            val current = downtimeMap["alwaysAllowedApps"] as? List<String> ?: emptyList()
-                            val updated = (current.toSet() + selectedApps.toSet()).toList()
-                            profileRef.set(
-                                mapOf("downtimeConfig" to mapOf("alwaysAllowedApps" to updated)),
-                                com.google.firebase.firestore.SetOptions.merge()
-                            ).await()
-                        } else {
-                            val snapshot = profileRef.get().await()
-                            val current = snapshot.get("restrictions") as? List<Map<String, Any>> ?: emptyList()
-                            val newList = current.toMutableList()
-                            selectedApps.forEach { pkg ->
-                                if (current.none { it["packageName"] == pkg }) {
-                                    val app = installedApps.find { it.packageName == pkg }
-                                    newList.add(mapOf(
-                                        "packageName" to pkg,
-                                        "appName" to (app?.appName ?: pkg),
-                                        "isBlocked" to true,
-                                        "limitType" to "INDIVIDUAL"
-                                    ))
-                                }
-                            }
-                            profileRef.set(
-                                mapOf("restrictions" to newList),
-                                com.google.firebase.firestore.SetOptions.merge()
-                            ).await()
-                            // Notify child device to enforce new restrictions immediately
-                            val parentId = com.google.firebase.auth.FirebaseAuth.getInstance().currentUser?.uid ?: ""
-                            if (parentId.isNotEmpty()) {
-                                val actionsManager = com.example.safe_kids.auth.ParentActionsManager(
-                                    com.google.firebase.firestore.FirebaseFirestore.getInstance()
-                                )
-                                actionsManager.sendCommand(
-                                    childId, parentId,
-                                    com.example.safe_kids.data.CommandType.UPDATE_APP_CATEGORIES
-                                )
-                            }
+                                val limitsRef = db.collection(AuthConfig.APP_USAGE_LIMITS_COLLECTION).document(childId)
+                                if (appsSelectionType == "ALLOWED") {
+                                    val snapshot = limitsRef.get().await()
+                                    val current = snapshot.get("alwaysAllowedApps") as? List<String> ?: emptyList()
+                                    val updated = (current.toSet() + selectedApps.toSet()).toList()
+                                    limitsRef.set(mapOf("alwaysAllowedApps" to updated), com.google.firebase.firestore.SetOptions.merge()).await()
+                                    android.util.Log.d("AppManagement", "Wrote app_usage_limits/$childId alwaysAllowedApps: $updated")
+                                } else {
+                                    val snapshot = limitsRef.get().await()
+                                    val current = snapshot.get("blockedApps") as? List<String> ?: emptyList()
+                                    val updated = (current.toSet() + selectedApps.toSet()).toList()
+                                    limitsRef.set(mapOf("blockedApps" to updated), com.google.firebase.firestore.SetOptions.merge()).await()
+                                    android.util.Log.d("AppManagement", "Wrote app_usage_limits/$childId blockedApps: $updated")
+                                    // Notify child device to enforce new restrictions immediately
+                                    val parentId = com.google.firebase.auth.FirebaseAuth.getInstance().currentUser?.uid ?: ""
+                                    if (parentId.isNotEmpty()) {
+                                        val actionsManager = com.example.safe_kids.auth.ParentActionsManager(
+                                            com.google.firebase.firestore.FirebaseFirestore.getInstance()
+                                        )
+                                        actionsManager.sendCommand(
+                                            childId, parentId,
+                                            com.example.safe_kids.data.CommandType.UPDATE_APP_CATEGORIES
+                                        )
+                                    }
                         }
                         showAddAppsSheet = false
                     }

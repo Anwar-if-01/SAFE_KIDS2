@@ -3,6 +3,8 @@ package com.example.safe_kids.ui.components
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -29,6 +31,7 @@ fun AdminCodeVerificationDialog(
     onSuccess: () -> Unit
 ) {
     val viewModel: AdminCodeViewModel = viewModel(factory = AdminCodeViewModelFactory(authManager))
+    val hasPin by viewModel.hasAdminCode.collectAsState()
     val scope = rememberCoroutineScope()
     var code by remember { mutableStateOf("") }
     var isVerifying by remember { mutableStateOf(false) }
@@ -39,11 +42,33 @@ fun AdminCodeVerificationDialog(
             if (!isVerifying) onDismiss()
         },
         title = {
-            Text(text = title, fontWeight = FontWeight.Bold, fontSize = 20.sp)
+            Text(text = title, fontWeight = FontWeight.Bold, fontSize = 20.sp, color = Color(0xFF1A1A1A))
         },
         text = {
             Column {
-                Text(text = description, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 14.sp)
+                if (!hasPin) {
+                    // FIX 5: Show message when PIN is not set
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFFFFF3E0))
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(Icons.Default.Info, null, tint = Color(0xFFFF9800), modifier = Modifier.size(24.dp))
+                            Spacer(Modifier.width(12.dp))
+                            Text(
+                                text = "Parental PIN has not been set. Please set it in parent mode first.",
+                                color = Color(0xFF1A1A1A),
+                                fontSize = 13.sp
+                            )
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(16.dp))
+                }
+                
+                Text(text = description, color = Color(0xFF666666), fontSize = 14.sp)
                 Spacer(modifier = Modifier.height(16.dp))
                 
                 OutlinedTextField(
@@ -51,7 +76,7 @@ fun AdminCodeVerificationDialog(
                     onValueChange = { 
                         if (it.length <= 4 && it.all { char -> char.isDigit() }) {
                             code = it
-                            errorMessage = null // Clear error when typing
+                            errorMessage = null
                         }
                     },
                     label = { Text("4-Digit Code") },
@@ -65,7 +90,7 @@ fun AdminCodeVerificationDialog(
                 if (errorMessage != null) {
                     Text(
                         text = errorMessage!!,
-                        color = MaterialTheme.colorScheme.error,
+                        color = Color(0xFFD32F2F),
                         style = MaterialTheme.typography.bodySmall,
                         modifier = Modifier.padding(top = 4.dp, start = 4.dp)
                     )
@@ -81,6 +106,7 @@ fun AdminCodeVerificationDialog(
                         errorMessage = null
                         scope.launch {
                             val isVerified = authManager.verifyAdminCode(trimmedCode)
+                            android.util.Log.d("AdminCodeDialog", "verifyAdminCode('$trimmedCode') returned: $isVerified")
                             isVerifying = false
                             if (isVerified) {
                                 onSuccess()
@@ -97,7 +123,7 @@ fun AdminCodeVerificationDialog(
                 if (isVerifying) {
                     CircularProgressIndicator(modifier = Modifier.size(16.dp), color = Color.White, strokeWidth = 2.dp)
                 } else {
-                    Text("Verify")
+                    Text("Verify", color = Color.White)
                 }
             }
         },
@@ -106,7 +132,7 @@ fun AdminCodeVerificationDialog(
                 onClick = onDismiss,
                 enabled = !isVerifying
             ) {
-                Text("Cancel", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("Cancel", color = Color(0xFF666666))
             }
         },
         shape = RoundedCornerShape(16.dp)

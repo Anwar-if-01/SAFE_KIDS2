@@ -6,14 +6,6 @@
         <entry key="Firebase Crashlytics">
           <value>
             <InsightsFilterSettings>
-              <option name="connection">
-                <ConnectionSetting>
-                  <option name="appId" value="com.example.safe_kids" />
-                  <option name="mobileSdkAppId" value="1:767296457950:android:933dffd272a716cdbfc64f" />
-                  <option name="projectId" value="safe-kids-cf8a6" />
-                  <option name="projectNumber" value="767296457950" />
-                </ConnectionSetting>
-              </option>
               <option name="signal" value="SIGNAL_UNSPECIFIED" />
               <option name="timeIntervalDays" value="THIRTY_DAYS" />
               <option name="visibilityType" value="ALL" />

@@ -33,7 +33,7 @@ data class DeviceInfo(
 class PresenceManager(private val context: Context) {
     
     private val firestore = FirebaseFirestore.getInstance()
-    private val realtimeDatabase = FirebaseDatabase.getInstance()
+    private val realtimeDatabase = com.example.safe_kids.utils.FirebaseUtils.getRealtimeDatabase()
     private val auth = FirebaseAuth.getInstance()
     
     companion object {

@@ -9,19 +9,17 @@ import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
-import androidx.compose.material.icons.filled.Logout
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.DisposableEffect
@@ -29,15 +27,17 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.lifecycle.LifecycleEventObserver
 import android.provider.Settings
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.safe_kids.utils.DeviceStatusMonitor
@@ -62,6 +62,8 @@ import com.google.firebase.firestore.FirebaseFirestore
 import com.example.safe_kids.data.*
 import java.text.SimpleDateFormat
 import java.util.*
+import coil.compose.AsyncImage
+import coil.request.ImageRequest
 
 private fun hasRequiredChildPermissions(context: android.content.Context): Boolean {
     val locationGranted = PermissionUtils.hasLocationPermissions(context) && PermissionUtils.hasBackgroundLocationPermission(context)
@@ -85,12 +87,26 @@ class ChildModeActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // Removed enableEdgeToEdge() for Android 12 compatibility
+        Log.d("SafeKidsDebug", "ChildModeActivity: onCreate started")
+        
+        // FIX #6: Check if ALL permissions are granted before allowing child dashboard
+        if (!com.example.safe_kids.utils.PermissionManager.areAllPermissionsGranted(this)) {
+            Log.w("SafeKidsDebug", "ChildModeActivity: Permissions not granted! Redirecting to RequiredPermissionsActivity")
+            val missingPermissions = com.example.safe_kids.utils.PermissionManager.getMissingPermissions(this)
+            Log.w("SafeKidsDebug", "ChildModeActivity: Missing permissions: $missingPermissions")
+            
+            val intent = Intent(this, RequiredPermissionsActivity::class.java)
+            intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+            startActivity(intent)
+            finish()
+            return
+        }
+        
+        Log.d("SafeKidsDebug", "ChildModeActivity: All permissions granted, proceeding with dashboard")
         
         // Initialize services
         authManager = AuthManagerImpl(this)
         
-        // Initialize AuthManager to verify session
         lifecycleScope.launch {
             authManager.initialize()
         }
@@ -101,11 +117,6 @@ class ChildModeActivity : ComponentActivity() {
         deviceStatusMonitor = DeviceStatusMonitor(this)
         restrictionRepository = com.example.safe_kids.data.RestrictionRepository(this)
 
-
-        
-        // FIX: Location sharing is started inside ChildModeScreen's LaunchedEffect using the
-        // real authenticated user ID. No call here to avoid the hardcoded-ID race condition.
-        
         setContent {
             var initialized by remember { mutableStateOf(false) }
             
@@ -134,7 +145,6 @@ class ChildModeActivity : ComponentActivity() {
                                 val currentChildId = authManager.getCurrentUser()?.id
                                 if (currentChildId != null && currentChildId.isNotEmpty()) {
                                     locationService.sendEmergencyLocation(currentChildId)
-                                    // Also send emergency SMS using last known location
                                     lifecycleScope.launch {
                                         val location = try {
                                             locationService.getCurrentLocation().firstOrNull()
@@ -153,7 +163,6 @@ class ChildModeActivity : ComponentActivity() {
         
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
-                // Return task to back (exit/minimize app) to prevent returning to mode selection
                 moveTaskToBack(true)
             }
         })
@@ -163,7 +172,6 @@ class ChildModeActivity : ComponentActivity() {
         if (::locationService.isInitialized) {
             try { locationService.stopLocationTracking() } catch (e: Exception) { }
         }
-        // RestrictionRepository uses callbackFlow and will remove its listener when collectors are cancelled.
         super.onDestroy()
     }
 }
@@ -215,12 +223,28 @@ fun ChildModeScreen(
     )
     
     val dynamicAllowedApps by childViewModel.allowedApps.collectAsState()
+    // FIX 1: Firestore-approved apps
+    val firestoreAllowedApps by childViewModel.firestoreAllowedApps.collectAsState()
+    val hasParentSetApps by childViewModel.hasParentSetApps.collectAsState()
+    
     val scope = rememberCoroutineScope()
+
+    // FIX 2: Focus Mode state sync to Firestore
+    // FIX 7: Sign Out state for Parental Settings
+    var showSignOutDialog by remember { mutableStateOf(false) }
+    var signOutPinsVerified by remember { mutableStateOf(false) }
 
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
-                permissionsMissing = hasRequiredChildPermissions(context)
+                val allPermissionsGranted = com.example.safe_kids.utils.PermissionManager.areAllPermissionsGranted(context)
+                if (!allPermissionsGranted) {
+                    Log.w("SafeKidsDebug", "ChildModeScreen: Permissions revoked! Redirecting to RequiredPermissionsActivity")
+                    context.startActivity(Intent(context, RequiredPermissionsActivity::class.java).apply {
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+                    })
+                }
+                permissionsMissing = !allPermissionsGranted
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -236,7 +260,13 @@ fun ChildModeScreen(
         }
     }
 
-    
+    // FIX 1: Observe Firestore allowed apps when child ID is available
+    LaunchedEffect(currentUser) {
+        currentUser?.let { user ->
+            childViewModel.observeFirestoreAllowedApps(user.id)
+        }
+    }
+
     var connectedParents by remember { mutableStateOf<List<com.example.safe_kids.auth.User>>(emptyList()) }
     
     val isPaired = currentUser?.parentIds?.isNotEmpty() == true
@@ -263,11 +293,9 @@ fun ChildModeScreen(
         }
     }
 
-    // Monitor for Study Mode completion to show dialog
     LaunchedEffect(currentAppMode) {
         if (currentAppMode == AppMode.NORMAL && studyModeConfig != null) {
              // Logic to detect if a session just ended
-             // We can check if we were in Study Mode just before
         }
     }
 
@@ -275,24 +303,18 @@ fun ChildModeScreen(
         if (isAuthenticated && currentUser != null) {
             currentMode = appBlockingService.getCurrentMode()
             
-            // Real info from local service
             val usageMillis = appBlockingService.getAppUsageToday("Total")
             screenTimeToday = formatScreenTime(usageMillis)
-            // allowedApps = listOf("Calculator", "Dictionary", "School App") // REMOVED MOCK
             
-            // Refresh connection status and mode whenever authentication or user data changes
             currentUser?.let { user ->
-                // Start restriction sync
                 scope.launch {
                     restrictionRepository.startRestrictionSync(user.id).collect {}
                 }
                 
                 locationService.setChildId(user.id)
-
                 locationService.startLocationTracking()
-                // FIX: Start location sharing with the real user ID (was previously "current_child_id")
                 locationService.enableLocationSharing(user.id)
-                // Start the always-on protection service
+                
                 val serviceIntent = Intent(context, com.example.safe_kids.services.ForegroundProtectionService::class.java)
                 if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
                     context.startForegroundService(serviceIntent)
@@ -339,21 +361,53 @@ fun ChildModeScreen(
             }
         }
     }
-    
+
+    var isInstantBlockedState by remember { mutableStateOf(false) }
+
+    LaunchedEffect(currentUser) {
+        currentUser?.let { user ->
+            try {
+                FirebaseFirestore.getInstance()
+                    .collection("children")
+                    .document(user.id)
+                    .addSnapshotListener { snapshot, error ->
+                        if (error != null || snapshot == null || !snapshot.exists()) return@addSnapshotListener
+                        val instantBlock = snapshot.getBoolean("instantBlock") ?: false
+                        Log.d("PermissionFlow", "Firestore instantBlock = $instantBlock")
+                        isInstantBlockedState = instantBlock
+                    }
+            } catch (e: Exception) {
+                Log.e("PermissionFlow", "Failed to listen for instantBlock changes", e)
+            }
+        }
+    }
+
+    // FIX 7: Sign out handler (requires PIN via ParentalSettings)
+    val handleSignOut: () -> Unit = {
+        com.example.safe_kids.utils.AuthUtils.signOutAndRedirect(context, authManager, scope)
+    }
+
+    // Determine which apps to show: Firestore-approved ones, or local restrictions
+    val displayApps = if (hasParentSetApps) {
+        firestoreAllowedApps
+    } else {
+        dynamicAllowedApps
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
                 title = { },
                 colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = if (selectedTab == 0) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surface,
-                    titleContentColor = if (selectedTab == 0) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface,
-                    actionIconContentColor = if (selectedTab == 0) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface
+                    containerColor = Color.Transparent,
+                    titleContentColor = Color.White,
+                    actionIconContentColor = Color.White
                 ),
                 actions = {
                     var showMenu by remember { mutableStateOf(false) }
                     Box {
                         IconButton(onClick = { showMenu = true }) {
-                            Icon(Icons.Default.MoreVert, contentDescription = "More")
+                            Icon(Icons.Default.MoreVert, contentDescription = "More", tint = Color.White)
                         }
                         DropdownMenu(
                             expanded = showMenu,
@@ -366,17 +420,33 @@ fun ChildModeScreen(
                                     .fillMaxWidth()
                             ) {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Surface(
-                                        shape = CircleShape,
-                                        color = MaterialTheme.colorScheme.primaryContainer,
-                                        modifier = Modifier.size(40.dp)
-                                    ) {
-                                        Box(contentAlignment = Alignment.Center) {
-                                            Text(
-                                                text = currentUser?.displayName?.take(1)?.uppercase() ?: "C",
-                                                style = MaterialTheme.typography.titleMedium,
-                                                color = MaterialTheme.colorScheme.onPrimaryContainer
-                                            )
+                                    // FIX 9: Profile image with Coil
+                                    if (!currentUser?.profileImageUrl.isNullOrBlank()) {
+                                        AsyncImage(
+                                            model = ImageRequest.Builder(context)
+                                                .data(currentUser?.profileImageUrl)
+                                                .crossfade(true)
+                                                .build(),
+                                            contentDescription = "Profile",
+                                            modifier = Modifier
+                                                .size(40.dp)
+                                                .clip(CircleShape),
+                                            contentScale = ContentScale.Crop
+                                        )
+                                    } else {
+                                        Surface(
+                                            shape = CircleShape,
+                                            color = Color(0xFF7C4DFF),
+                                            modifier = Modifier.size(40.dp)
+                                        ) {
+                                            Box(contentAlignment = Alignment.Center) {
+                                                Text(
+                                                    text = currentUser?.displayName?.take(1)?.uppercase() ?: "C",
+                                                    style = MaterialTheme.typography.titleMedium,
+                                                    color = Color.White,
+                                                    fontWeight = FontWeight.Bold
+                                                )
+                                            }
                                         }
                                     }
                                     Spacer(modifier = Modifier.width(12.dp))
@@ -398,7 +468,7 @@ fun ChildModeScreen(
                             HorizontalDivider()
                             
                             DropdownMenuItem(
-                                text = { Text("Edit Child Profile") },
+                                text = { Text("Edit Profile") },
                                 onClick = {
                                     showMenu = false
                                     showProfileEditor = true
@@ -416,55 +486,18 @@ fun ChildModeScreen(
                                 },
                                 leadingIcon = { Icon(Icons.Default.Settings, null) }
                             )
-                            DropdownMenuItem(
-                                text = { Text("Chat with Parent") },
-                                onClick = {
-                                    showMenu = false
-                                    val parentId = connectedParents.firstOrNull()?.id ?: ""
-                                    val parentName = connectedParents.firstOrNull()?.displayName ?: "Parent"
-                                    val intent = Intent(context, com.example.safe_kids.ui.chat.ChatActivity::class.java).apply {
-                                        putExtra("OTHER_USER_ID", parentId)
-                                        putExtra("OTHER_USER_NAME", parentName)
-                                        putExtra("IS_PARENT", false)
-                                    }
-                                    context.startActivity(intent)
-                                },
-                                leadingIcon = { Icon(Icons.Default.Message, null) }
-                            )
-                            HorizontalDivider()
-                            DropdownMenuItem(
-                                text = { Text("Switch Mode") },
-                                onClick = {
-                                    showMenu = false
-                                    pendingAction = {
-                                        authManager.sessionManager.clearModeState()
-                                        val intent = Intent(context, com.example.safe_kids.MainActivity::class.java).apply {
-                                            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
-                                        }
-                                        context.startActivity(intent)
-                                    }
-                                    showAdminCodeDialog = true
-                                },
-                                leadingIcon = { Icon(Icons.Default.Sync, null) }
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Sign Out") },
-                                onClick = {
-                                    showMenu = false
-                                    pendingAction = {
-                                        com.example.safe_kids.utils.AuthUtils.signOutAndRedirect(context, authManager, scope)
-                                    }
-                                    showAdminCodeDialog = true
-                                },
-                                leadingIcon = { Icon(Icons.Default.Logout, null) }
-                            )
+                            // FIX 3: "Chat with Parent" REMOVED from 3-dots menu (already in Family tab)
+                            // FIX 8: "Switch Mode" REMOVED from 3-dots menu entirely
                         }
                     }
                 }
             )
         },
         bottomBar = {
-            NavigationBar {
+            NavigationBar(
+                containerColor = Color.White,
+                contentColor = Color(0xFF1A1A1A)
+            ) {
                 NavigationBarItem(
                     selected = selectedTab == 0,
                     onClick = { selectedTab = 0 },
@@ -492,7 +525,7 @@ fun ChildModeScreen(
                                     addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                                 })
                             },
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFFFFCDD2))
                     ) {
                         Row(
                             modifier = Modifier
@@ -500,28 +533,22 @@ fun ChildModeScreen(
                                 .padding(16.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Icon(Icons.Default.Warning, null, tint = MaterialTheme.colorScheme.onErrorContainer)
+                            Icon(Icons.Default.Warning, null, tint = Color(0xFFD32F2F))
                             Spacer(Modifier.width(12.dp))
                             Text(
                                 "⚠️ Important permission missing - tap to fix",
-                                color = MaterialTheme.colorScheme.onErrorContainer,
+                                color = Color(0xFFD32F2F),
                                 fontWeight = FontWeight.Bold
                             )
                         }
                     }
                 }
+                // FIX 6: Redesigned child home screen
                 ChildHomeScreen(
                     paddingValues = paddingValues,
                     deviceName = deviceStatus.deviceName,
                     guardianEmail = connectedParents.firstOrNull()?.email ?: "guardian",
-                    isFocusMode = currentMode == AppMode.FOCUS_MODE,
-                    onFocusModeToggle = { enabled ->
-                        scope.launch {
-                            if (enabled) appBlockingService.setMode(AppMode.FOCUS_MODE)
-                            else appBlockingService.setMode(AppMode.NORMAL)
-                            currentMode = appBlockingService.getCurrentMode()
-                        }
-                    },
+                    isInstantBlocked = isInstantBlockedState,
                     onParentalSettingsClick = {
                         pendingAction = {
                             context.startActivity(Intent(context, ParentalSettingsActivity::class.java))
@@ -534,12 +561,17 @@ fun ChildModeScreen(
                     onEmergency = {
                         showEmergencyDialog = true
                     },
-                    allowedApps = dynamicAllowedApps,
+                    // FIX 1: Pass Firestore-approved apps
+                    allowedApps = displayApps,
+                    hasParentSetApps = hasParentSetApps,
                     currentAppMode = currentMode,
                     studyModeConfig = studyModeConfig,
-                    sleepModeConfig = sleepModeConfig
+                    sleepModeConfig = sleepModeConfig,
+                    // FIX 9: Pass child info for avatar
+                    childName = currentUser?.displayName ?: "Child",
+                    childPhotoUrl = currentUser?.profileImageUrl ?: ""
                 )
-            } // close Column
+            }
         } else {
             // Family tab
             Column(
@@ -553,7 +585,7 @@ fun ChildModeScreen(
                 )
             }
         }
-    } // end Scaffold content lambda
+    }
 
     if (showEmergencyDialog) {
         EmergencyDialog(
@@ -577,7 +609,6 @@ fun ChildModeScreen(
                 if (pendingAction != null) {
                     pendingAction?.invoke()
                 } else {
-                    // Default action if no pending action (e.g. Parental Settings)
                     context.startActivity(Intent(context, ParentalSettingsActivity::class.java))
                 }
                 pendingAction = null
@@ -591,7 +622,6 @@ fun ChildModeScreen(
             onComplete = { 
                 showSetupDialog = false
                 showPairingDialog = true
-                // Auto-generate pairing code after setup
                 scope.launch {
                     isGeneratingCode = true
                     pairingError = null
@@ -677,34 +707,37 @@ fun ChildModeScreen(
 
     if (showStudyCompletionDialog) {
         StudyModeCompletionDialog(
-            duration = 45, // Placeholder or fetch real duration from session log
+            duration = 45,
             onDismiss = { showStudyCompletionDialog = false }
         )
     }
 }
 
+// FIX 6: REDESIGNED CHILD HOME SCREEN
 @Composable
 fun ChildHomeScreen(
     paddingValues: PaddingValues,
     deviceName: String,
     guardianEmail: String,
-    isFocusMode: Boolean,
-    onFocusModeToggle: (Boolean) -> Unit,
+    isInstantBlocked: Boolean,
     onParentalSettingsClick: () -> Unit,
     onPairDevice: () -> Unit,
     onEmergency: () -> Unit,
     allowedApps: List<String>,
+    hasParentSetApps: Boolean,
     currentAppMode: com.example.safe_kids.services.blocking.AppMode,
     studyModeConfig: com.example.safe_kids.data.StudyModeConfig?,
-    sleepModeConfig: com.example.safe_kids.data.SleepModeConfig?
+    sleepModeConfig: com.example.safe_kids.data.SleepModeConfig?,
+    childName: String,
+    childPhotoUrl: String
 ) {
-
+    val context = LocalContext.current
     var showMenu by remember { mutableStateOf(false) }
+    
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
-            .padding(bottom = paddingValues.calculateBottomPadding())
+            .verticalScroll(rememberScrollState())
     ) {
         if (currentAppMode == com.example.safe_kids.services.blocking.AppMode.STUDY_MODE && studyModeConfig != null) {
             StudyModeBanner(studyModeConfig)
@@ -712,86 +745,315 @@ fun ChildHomeScreen(
             SleepModeBanner(sleepModeConfig)
         }
         
-        // Blue Header
+        // FIX 6: Gradient header with avatar
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(260.dp)
-                .background(MaterialTheme.colorScheme.primary)
-                .padding(16.dp)
-        ) {
-            // Space for the TopAppBar
-            Spacer(modifier = Modifier.statusBarsPadding().height(56.dp))
-
-            // Cloud Shape and Illustration - Now inside the header Box to support Alignment.BottomCenter
-            Box(
-                modifier = Modifier
-                    .align(androidx.compose.ui.Alignment.BottomCenter)
-                    .offset(y = 60.dp)
-                    .fillMaxWidth(0.9f)
-                    .height(200.dp)
-                    .clip(RoundedCornerShape(32.dp))
-                    .background(MaterialTheme.colorScheme.surface)
-                    .padding(16.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    // Illustration Placeholder
-                    Box(
-                        modifier = Modifier
-                            .size(120.dp)
-                            .clip(CircleShape)
-                            .background(MaterialTheme.colorScheme.surfaceVariant),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text("👨‍👩‍👧‍👦", fontSize = 64.sp)
-                    }
-                    
-                    Spacer(modifier = Modifier.height(12.dp))
-                    
-                    Text(
-                        text = "Supervision Mode enabled",
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 18.sp,
-                        color = MaterialTheme.colorScheme.onSurface
+                .height(220.dp)
+                .background(
+                    Brush.verticalGradient(
+                        colors = listOf(Color(0xFF5C6BC0), Color(0xFF7C4DFF))
                     )
+                )
+                .padding(top = paddingValues.calculateTopPadding())
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                // FIX 9: Profile image - Coil or letter avatar
+                if (childPhotoUrl.isNotBlank()) {
+                    AsyncImage(
+                        model = ImageRequest.Builder(context)
+                            .data(childPhotoUrl)
+                            .crossfade(true)
+                            .build(),
+                        contentDescription = "Child profile",
+                        modifier = Modifier
+                            .size(72.dp)
+                            .clip(CircleShape),
+                        contentScale = ContentScale.Crop
+                    )
+                } else {
+                    Surface(
+                        modifier = Modifier.size(72.dp),
+                        shape = CircleShape,
+                        color = Color.White.copy(alpha = 0.3f)
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Text(
+                                text = childName.take(1).uppercase(),
+                                fontSize = 36.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White
+                            )
+                        }
+                    }
+                }
+                
+                Spacer(modifier = Modifier.height(12.dp))
+                
+                Text(
+                    text = "Hi, $childName!",
+                    fontSize = 24.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = Color.White
+                )
+                
+                Spacer(modifier = Modifier.height(4.dp))
+                
+                // Supervision status chip
+                Surface(
+                    shape = RoundedCornerShape(20.dp),
+                    color = Color.White.copy(alpha = 0.2f)
+                ) {
                     Text(
-                        text = "The guardian ($guardianEmail) can manage how this device is used now.",
+                        text = "🛡️ Under Supervision",
+                        color = Color.White,
                         fontSize = 12.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        textAlign = TextAlign.Center,
-                        lineHeight = 16.sp
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
                     )
                 }
             }
         }
-
-        Spacer(modifier = Modifier.height(80.dp))
-
-        // Action Items
-        Column(
-            modifier = Modifier.padding(horizontal = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+        
+        Spacer(modifier = Modifier.height(16.dp))
+        
+        // FIX 2: Instant Block read-only status indicator
+        // Child CANNOT toggle — only parent controls it via instantBlock
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = if (isInstantBlocked) Color(0xFFFFF3E0) else Color(0xFFE8F5E9)
+            ),
+            shape = RoundedCornerShape(16.dp),
+            elevation = CardDefaults.cardElevation(4.dp)
         ) {
-            HomeActionItem(
-                title = "Focus Mode",
-                icon = Icons.Default.Face,
-                iconColor = Color(0xFF22C55E),
-                action = {
-                    Switch(
-                        checked = isFocusMode,
-                        onCheckedChange = onFocusModeToggle,
-                        colors = SwitchDefaults.colors(
-                            checkedThumbColor = MaterialTheme.colorScheme.surface,
-                            checkedTrackColor = Color(0xFF22C55E)
-                        )
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // Icon
+                Box(
+                    modifier = Modifier
+                        .size(48.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(if (isInstantBlocked) Color(0xFFFF9800) else Color(0xFF4CAF50)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = if (isInstantBlocked) Icons.Default.Lock else Icons.Default.Face,
+                        contentDescription = null,
+                        tint = Color.White,
+                        modifier = Modifier.size(28.dp)
                     )
                 }
+                
+                Spacer(modifier = Modifier.width(16.dp))
+                
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = if (isInstantBlocked) "Instant Block is Active" else "Instant Block is Off",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 18.sp,
+                        color = Color(0xFF1A1A1A)
+                    )
+                    // Read-only status description
+                    Text(
+                        text = if (isInstantBlocked) "Set by your parent — only approved apps are accessible"
+                              else "Your parent can enable this to restrict access",
+                        fontSize = 12.sp,
+                        color = Color(0xFF666666)
+                    )
+                }
+                
+                // Read-only lock icon instead of toggle switch
+                Icon(
+                    imageVector = if (isInstantBlocked) Icons.Default.Lock else Icons.Default.LockOpen,
+                    contentDescription = if (isInstantBlocked) "Locked by parent" else "Unlocked",
+                    tint = if (isInstantBlocked) Color(0xFFFF9800) else Color(0xFF4CAF50),
+                    modifier = Modifier.size(24.dp)
+                )
+            }
+        }
+        
+        Spacer(modifier = Modifier.height(20.dp))
+        
+        // Allowed Apps section - FIX 6: Colorful grid
+        Column(modifier = Modifier.padding(horizontal = 16.dp)) {
+            Text(
+                text = "Approved Apps",
+                fontWeight = FontWeight.Bold,
+                fontSize = 18.sp,
+                color = Color(0xFF1A1A1A),
+                modifier = Modifier.padding(bottom = 12.dp)
             )
-
-            Spacer(modifier = Modifier.height(16.dp))
             
-            AllowedAppsCard(allowedApps = allowedApps)
+            if (!hasParentSetApps && allowedApps.isEmpty()) {
+                // FIX 1: Show "No apps approved" message when parent hasn't set any
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFFF5F5F5)),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(24.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Icon(
+                            Icons.Default.Apps,
+                            contentDescription = null,
+                            tint = Color(0xFFBDBDBD),
+                            modifier = Modifier.size(48.dp)
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Text(
+                            text = "No apps have been approved by your parent yet",
+                            color = Color(0xFF757575),
+                            textAlign = TextAlign.Center,
+                            fontSize = 14.sp
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = "Ask your parent to approve apps from their dashboard",
+                            color = Color(0xFF9E9E9E),
+                            textAlign = TextAlign.Center,
+                            fontSize = 12.sp
+                        )
+                    }
+                }
+            } else {
+                // Colorful 2-column grid
+                LazyVerticalGrid(
+                    columns = GridCells.Fixed(2),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 500.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                    contentPadding = PaddingValues(bottom = 16.dp)
+                ) {
+                    items(allowedApps.take(12)) { appName ->
+                        AppGridCard(appName = appName)
+                    }
+                    if (allowedApps.size > 12) {
+                        item {
+                            Card(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(100.dp),
+                                colors = CardDefaults.cardColors(containerColor = Color(0xFFF5F5F5)),
+                                shape = RoundedCornerShape(12.dp)
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Text(
+                                        text = "+${allowedApps.size - 12} more",
+                                        color = Color(0xFF757575),
+                                        fontSize = 13.sp
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        Spacer(modifier = Modifier.height(16.dp))
+        
+        // Quick Actions row
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            OutlinedButton(
+                onClick = onEmergency,
+                modifier = Modifier.weight(1f),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFD32F2F)),
+                border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFEF9A9A))
+            ) {
+                Icon(Icons.Default.Warning, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("Emergency")
+            }
+            OutlinedButton(
+                onClick = onPairDevice,
+                modifier = Modifier.weight(1f),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFF5C6BC0)),
+                border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFC5CAE9))
+            ) {
+                Icon(Icons.Default.ConnectedTv, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("Pair Device")
+            }
+        }
+        
+        Spacer(modifier = Modifier.height(24.dp))
+    }
+}
+
+// FIX 6: App grid card with pastel colors
+@Composable
+fun AppGridCard(appName: String) {
+    val pastelColors = listOf(
+        Color(0xFFE3F2FD), Color(0xFFFCE4EC), Color(0xFFE8F5E9),
+        Color(0xFFFFF3E0), Color(0xFFF3E5F5), Color(0xFFE0F7FA),
+        Color(0xFFFFFDE7), Color(0xFFFBE9E7), Color(0xFFE8EAF6),
+        Color(0xFFFFF8E1), Color(0xFFF1F8E9), Color(0xFFFFF0F0)
+    )
+    val bgColor = pastelColors[appName.hashCode().let { if (it < 0) -it else it } % pastelColors.size]
+    
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(100.dp),
+        colors = CardDefaults.cardColors(containerColor = bgColor),
+        shape = RoundedCornerShape(16.dp),
+        elevation = CardDefaults.cardElevation(2.dp)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(12.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
+        ) {
+            // App icon placeholder with first letter
+            Surface(
+                modifier = Modifier.size(36.dp),
+                shape = CircleShape,
+                color = Color.White.copy(alpha = 0.7f)
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Text(
+                        text = appName.take(1).uppercase(),
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 16.sp,
+                        color = Color(0xFF555555)
+                    )
+                }
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = appName,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Medium,
+                color = Color(0xFF333333),
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                textAlign = TextAlign.Center
+            )
         }
     }
 }
@@ -830,224 +1092,10 @@ fun HomeActionItem(
                 text = title,
                 modifier = Modifier.weight(1f),
                 fontWeight = FontWeight.Medium,
-                fontSize = 16.sp
+                fontSize = 16.sp,
+                color = Color(0xFF1A1A1A)
             )
             action()
-        }
-    }
-}
-
-@Composable
-fun CurrentStatusCard(
-    mode: AppMode,
-    screenTime: String
-) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(
-            containerColor = when (mode) {
-                AppMode.STUDY_MODE -> MaterialTheme.colorScheme.primaryContainer
-                AppMode.SLEEP_MODE -> MaterialTheme.colorScheme.secondaryContainer
-                AppMode.FOCUS_MODE -> MaterialTheme.colorScheme.tertiaryContainer
-                AppMode.NORMAL -> MaterialTheme.colorScheme.surfaceVariant
-            }
-        )
-    ) {
-        Column(
-            modifier = Modifier.padding(20.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            // Mode Icon
-            val (icon, title, description) = when (mode) {
-                AppMode.STUDY_MODE -> Triple(
-                    "📚",
-                    "Study Mode Active",
-                    "Only educational apps are available"
-                )
-                AppMode.SLEEP_MODE -> Triple(
-                    "😴",
-                    "Sleep Mode Active", 
-                    "Time to rest! Most apps are blocked"
-                )
-                AppMode.FOCUS_MODE -> Triple(
-                    "🎯",
-                    "Focus Mode Active",
-                    "Stay focused on your current task"
-                )
-                AppMode.NORMAL -> Triple(
-                    "🛡️",
-                    "Safe Mode",
-                    "You're protected and monitored"
-                )
-            }
-            
-            Text(
-                text = icon,
-                style = MaterialTheme.typography.displayMedium
-            )
-            
-            Spacer(modifier = Modifier.height(8.dp))
-            
-            Text(
-                text = title,
-                style = MaterialTheme.typography.headlineSmall,
-                fontWeight = FontWeight.Bold,
-                textAlign = TextAlign.Center
-            )
-            
-            Text(
-                text = description,
-                style = MaterialTheme.typography.bodyMedium,
-                textAlign = TextAlign.Center,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            
-            Spacer(modifier = Modifier.height(16.dp))
-            
-            // Screen Time Today
-            Row(
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Icon(
-                    Icons.Default.Schedule,
-                    contentDescription = "Screen Time",
-                    modifier = Modifier.size(20.dp)
-                )
-                
-                Spacer(modifier = Modifier.width(8.dp))
-                
-                Text(
-                    text = "Screen time today: $screenTime",
-                    style = MaterialTheme.typography.bodyMedium
-                )
-            }
-        }
-    }
-}
-
-@Composable
-fun QuickActionsCard(
-    isPaired: Boolean,
-    onPairDevice: () -> Unit,
-    onEmergency: () -> Unit
-) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
-    ) {
-        Column(
-            modifier = Modifier.padding(16.dp)
-        ) {
-            Text(
-                text = "Quick Actions",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold
-            )
-            
-            Spacer(modifier = Modifier.height(16.dp))
-            
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                // Pair with Parent
-                Button(
-                    onClick = onPairDevice,
-                    modifier = Modifier.weight(1f),
-                    colors = if (isPaired) {
-                        ButtonDefaults.buttonColors(
-                            containerColor = MaterialTheme.colorScheme.primaryContainer,
-                            contentColor = MaterialTheme.colorScheme.onPrimaryContainer
-                        )
-                    } else {
-                        ButtonDefaults.buttonColors()
-                    },
-                    shape = RoundedCornerShape(12.dp)
-                ) {
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        Icon(
-                            if (isPaired) Icons.Default.CheckCircle else Icons.Default.ConnectedTv, 
-                            contentDescription = null
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(if (isPaired) "Connected" else "Pair Device")
-                    }
-                }
-                
-                // Emergency Button
-                Button(
-                    onClick = onEmergency,
-                    modifier = Modifier.weight(1f),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.error
-                    )
-                ) {
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        Icon(Icons.Default.Warning, contentDescription = null)
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text("Emergency")
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-fun ActiveModeCard(mode: AppMode) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
-    ) {
-        Column(
-            modifier = Modifier.padding(16.dp)
-        ) {
-            Text(
-                text = when (mode) {
-                    AppMode.STUDY_MODE -> "Study Mode Guidelines"
-                    AppMode.SLEEP_MODE -> "Sleep Mode Guidelines"
-                    AppMode.FOCUS_MODE -> "Focus Mode Guidelines"
-                    AppMode.NORMAL -> "Normal Mode"
-                },
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold
-            )
-            
-            Spacer(modifier = Modifier.height(12.dp))
-            
-            val guidelines = when (mode) {
-                AppMode.STUDY_MODE -> listOf(
-                    "📖 Educational apps are available",
-                    "🚫 Games and social media are blocked",
-                    "⏰ Focus on your studies",
-                    "📱 Limited notifications"
-                )
-                AppMode.SLEEP_MODE -> listOf(
-                    "😴 Time to sleep and rest",
-                    "🚫 Most apps are blocked",
-                    "🆘 Emergency features still work",
-                    "🌙 Good night!"
-                )
-                AppMode.FOCUS_MODE -> listOf(
-                    "🎯 Stay focused on your task",
-                    "⏱️ Timer is running",
-                    "🚫 Distracting apps are blocked",
-                    "💪 You can do this!"
-                )
-                AppMode.NORMAL -> emptyList()
-            }
-            
-            guidelines.forEach { guideline ->
-                Text(
-                    text = guideline,
-                    style = MaterialTheme.typography.bodyMedium,
-                    modifier = Modifier.padding(vertical = 2.dp)
-                )
-            }
         }
     }
 }
@@ -1064,7 +1112,8 @@ fun AllowedAppsCard(allowedApps: List<String>) {
             Text(
                 text = "Available Apps",
                 style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold
+                fontWeight = FontWeight.Bold,
+                color = Color(0xFF1A1A1A)
             )
             
             Spacer(modifier = Modifier.height(12.dp))
@@ -1073,10 +1122,9 @@ fun AllowedAppsCard(allowedApps: List<String>) {
                 Text(
                     text = "Loading available apps...",
                     style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = Color(0xFF757575)
                 )
             } else {
-                // Show allowed apps
                 allowedApps.forEach { app ->
                     Row(
                         modifier = Modifier
@@ -1095,7 +1143,8 @@ fun AllowedAppsCard(allowedApps: List<String>) {
                         
                         Text(
                             text = app,
-                            style = MaterialTheme.typography.bodyMedium
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = Color(0xFF1A1A1A)
                         )
                     }
                 }
@@ -1164,7 +1213,7 @@ fun ActivityStat(
             icon,
             contentDescription = label,
             modifier = Modifier.size(24.dp),
-            tint = MaterialTheme.colorScheme.primary
+            tint = Color(0xFF5C6BC0)
         )
         
         Spacer(modifier = Modifier.height(4.dp))
@@ -1172,136 +1221,15 @@ fun ActivityStat(
         Text(
             text = value,
             style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.Bold
+            fontWeight = FontWeight.Bold,
+            color = Color(0xFF1A1A1A)
         )
         
         Text(
             text = label,
             style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
+            color = Color(0xFF757575)
         )
-    }
-}
-
-@Composable
-fun SafetyFeaturesCard() {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
-    ) {
-        Column(
-            modifier = Modifier.padding(16.dp)
-        ) {
-            Text(
-                text = "Safety Features Active",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold
-            )
-            
-            Spacer(modifier = Modifier.height(12.dp))
-            
-            val features = listOf(
-                "🛡️ Content filtering active",
-                "📍 Location sharing with parents",
-                "🚫 App restrictions enforced",
-                "⏰ Screen time monitoring",
-                "🆘 Emergency features available"
-            )
-            
-            features.forEach { feature ->
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 2.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(8.dp)
-                            .clip(CircleShape)
-                            .background(MaterialTheme.colorScheme.primary)
-                    )
-                    
-                    Spacer(modifier = Modifier.width(12.dp))
-                    
-                    Text(
-                        text = feature,
-                        style = MaterialTheme.typography.bodyMedium
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-fun ParentConnectionCard(parents: List<com.example.safe_kids.auth.User>, isPaired: Boolean) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
-    ) {
-        Column(
-            modifier = Modifier.padding(16.dp)
-        ) {
-            Text(
-                text = "Parent Connection",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold
-            )
-            
-            Spacer(modifier = Modifier.height(12.dp))
-            
-            if (!isPaired) {
-                 Row(
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(
-                        Icons.Default.LinkOff,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.error,
-                        modifier = Modifier.size(24.dp)
-                    )
-                    
-                    Spacer(modifier = Modifier.width(12.dp))
-                    
-                    Text(
-                        text = "Not connected to any parent device.\nTap 'Pair Device' to link.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            } else {
-                parents.forEach { parent ->
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.padding(vertical = 4.dp)
-                    ) {
-                        Icon(
-                            Icons.Default.CheckCircle,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(24.dp)
-                        )
-                        
-                        Spacer(modifier = Modifier.width(12.dp))
-                        
-                        Column {
-                            Text(
-                                text = "Connected to ${parent.displayName ?: "Parent"}",
-                                style = MaterialTheme.typography.bodyMedium,
-                                fontWeight = FontWeight.Medium
-                            )
-                            
-                            Text(
-                                text = "Active",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
-                }
-            }
-        }
     }
 }
 
@@ -1315,17 +1243,17 @@ fun EmergencyDialog(
         title = { 
             Text(
                 "🆘 Emergency Alert",
-                color = MaterialTheme.colorScheme.error
+                color = Color(0xFFD32F2F)
             )
         },
         text = {
-            Text("This will immediately alert your parents with your current location. Use only in real emergencies.")
+            Text("This will immediately alert your parents with your current location. Use only in real emergencies.", color = Color(0xFF1A1A1A))
         },
         confirmButton = {
             Button(
                 onClick = onConfirm,
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = MaterialTheme.colorScheme.error
+                    containerColor = Color(0xFFD32F2F)
                 )
             ) {
                 Text("Send Emergency Alert")
@@ -1353,12 +1281,13 @@ fun PairingDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Pair with Parent") },
+        title = { Text("Pair with Parent", color = Color(0xFF1A1A1A)) },
         text = {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text(
                     text = "Generate a code to connect with your parent's device:",
-                    style = MaterialTheme.typography.bodyMedium
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = Color(0xFF1A1A1A)
                 )
                 
                 Spacer(modifier = Modifier.height(16.dp))
@@ -1371,7 +1300,7 @@ fun PairingDialog(
                     Card(
                         modifier = Modifier.fillMaxWidth(),
                         colors = CardDefaults.cardColors(
-                            containerColor = MaterialTheme.colorScheme.primaryContainer
+                            containerColor = Color(0xFFE8EAF6)
                         )
                     ) {
                         Text(
@@ -1379,6 +1308,7 @@ fun PairingDialog(
                             style = MaterialTheme.typography.displayMedium,
                             fontWeight = FontWeight.Bold,
                             textAlign = TextAlign.Center,
+                            color = Color(0xFF1A1A1A),
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .padding(16.dp)
@@ -1390,7 +1320,7 @@ fun PairingDialog(
                     Text(
                         text = "Show this code to your parent to link this device.",
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        color = Color(0xFF757575),
                         textAlign = TextAlign.Center,
                         modifier = Modifier.fillMaxWidth()
                     )
@@ -1399,7 +1329,7 @@ fun PairingDialog(
                         modifier = Modifier.fillMaxWidth().height(80.dp),
                         contentAlignment = Alignment.Center
                     ) {
-                        Text("Tap 'Generate Code' to start")
+                        Text("Tap 'Generate Code' to start", color = Color(0xFF757575))
                     }
                 }
 
@@ -1408,7 +1338,7 @@ fun PairingDialog(
                     Text(
                         text = errorMessage,
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.error,
+                        color = Color(0xFFD32F2F),
                         textAlign = TextAlign.Center,
                         modifier = Modifier.fillMaxWidth()
                     )
@@ -1438,7 +1368,6 @@ fun ChildProfileSection(
     Column(
         modifier = Modifier.fillMaxWidth()
     ) {
-        // Actions
         Spacer(modifier = Modifier.height(16.dp))
         Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
             Column {
@@ -1450,7 +1379,6 @@ fun ChildProfileSection(
                 )
             }
         }
-        
     }
 }
 
@@ -1469,45 +1397,16 @@ fun SettingsItem(
             modifier = Modifier.padding(16.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+            Icon(icon, contentDescription = null, tint = Color(0xFF5C6BC0))
             Spacer(modifier = Modifier.width(16.dp))
             Column(modifier = Modifier.weight(1f)) {
-                Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                Text(description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = Color(0xFF1A1A1A))
+                Text(description, style = MaterialTheme.typography.bodySmall, color = Color(0xFF757575))
             }
-            Icon(Icons.Default.ChevronRight, contentDescription = null, modifier = Modifier.size(16.dp))
+            Icon(Icons.Default.ChevronRight, contentDescription = null, modifier = Modifier.size(16.dp), tint = Color(0xFF757575))
         }
     }
 }
-@Composable
-fun SettingsToggleItem(
-    title: String,
-    description: String,
-    icon: ImageVector,
-    checked: Boolean,
-    onCheckedChange: (Boolean) -> Unit
-) {
-    Surface(
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Row(
-            modifier = Modifier.padding(16.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-            Spacer(modifier = Modifier.width(16.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                Text(description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-            Switch(
-                checked = checked,
-                onCheckedChange = onCheckedChange
-            )
-        }
-    }
-}
-
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -1535,7 +1434,8 @@ fun DeviceSetupDialog(
         title = { 
             Text(
                 text = "Device Setup",
-                fontWeight = FontWeight.Bold
+                fontWeight = FontWeight.Bold,
+                color = Color(0xFF1A1A1A)
             ) 
         },
         text = {
@@ -1558,9 +1458,9 @@ fun DeviceSetupDialog(
                                 .clip(RoundedCornerShape(2.dp))
                                 .background(
                                     if (index <= currentStep) 
-                                        MaterialTheme.colorScheme.primary 
+                                        Color(0xFF5C6BC0) 
                                     else 
-                                        MaterialTheme.colorScheme.surfaceVariant
+                                        Color(0xFFE0E0E0)
                                 )
                         )
                     }
@@ -1568,7 +1468,6 @@ fun DeviceSetupDialog(
                 
                 Spacer(modifier = Modifier.height(24.dp))
                 
-                // Step content
                 when (currentStep) {
                     0 -> WelcomeStep()
                     1 -> DeviceNameStep(
@@ -1596,19 +1495,18 @@ fun DeviceSetupDialog(
             when (currentStep) {
                 steps.lastIndex -> {
                     Button(
-                        onClick = {
-                            // Save settings and complete setup
-                            onComplete()
-                        }
+                        onClick = onComplete,
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF5C6BC0))
                     ) {
-                        Text("Complete Setup")
+                        Text("Complete Setup", color = Color.White)
                     }
                 }
                 else -> {
                     Button(
-                        onClick = { currentStep++ }
+                        onClick = { currentStep++ },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF5C6BC0))
                     ) {
-                        Text("Next")
+                        Text("Next", color = Color.White)
                     }
                 }
             }
@@ -1616,11 +1514,11 @@ fun DeviceSetupDialog(
         dismissButton = {
             if (currentStep > 0) {
                 TextButton(onClick = { currentStep-- }) {
-                    Text("Back")
+                    Text("Back", color = Color(0xFF757575))
                 }
             } else {
                 TextButton(onClick = onDismiss) {
-                    Text("Cancel")
+                    Text("Cancel", color = Color(0xFF757575))
                 }
             }
         }
@@ -1642,20 +1540,21 @@ private fun WelcomeStep() {
             text = "Welcome to Safe Kids!",
             style = MaterialTheme.typography.headlineSmall,
             fontWeight = FontWeight.Bold,
-            textAlign = TextAlign.Center
+            textAlign = TextAlign.Center,
+            color = Color(0xFF1A1A1A)
         )
         
         Text(
             text = "Let's set up your device to keep you safe and connected with your parents.",
             style = MaterialTheme.typography.bodyMedium,
             textAlign = TextAlign.Center,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
+            color = Color(0xFF757575)
         )
         
         Card(
             modifier = Modifier.fillMaxWidth(),
             colors = CardDefaults.cardColors(
-                containerColor = MaterialTheme.colorScheme.primaryContainer
+                containerColor = Color(0xFFE8EAF6)
             )
         ) {
             Column(
@@ -1664,11 +1563,12 @@ private fun WelcomeStep() {
             ) {
                 Text(
                     text = "What we'll set up:",
-                    fontWeight = FontWeight.Bold
+                    fontWeight = FontWeight.Bold,
+                    color = Color(0xFF1A1A1A)
                 )
-                Text("• Device name and profile", fontSize = 14.sp)
-                Text("• Important permissions", fontSize = 14.sp)
-                Text("• Safety and monitoring features", fontSize = 14.sp)
+                Text("• Device name and profile", fontSize = 14.sp, color = Color(0xFF1A1A1A))
+                Text("• Important permissions", fontSize = 14.sp, color = Color(0xFF1A1A1A))
+                Text("• Safety and monitoring features", fontSize = 14.sp, color = Color(0xFF1A1A1A))
             }
         }
     }
@@ -1692,14 +1592,15 @@ private fun DeviceNameStep(
             text = "Name Your Device",
             style = MaterialTheme.typography.headlineSmall,
             fontWeight = FontWeight.Bold,
-            textAlign = TextAlign.Center
+            textAlign = TextAlign.Center,
+            color = Color(0xFF1A1A1A)
         )
         
         Text(
             text = "Choose a name for this device so your parents can easily identify it.",
             style = MaterialTheme.typography.bodyMedium,
             textAlign = TextAlign.Center,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
+            color = Color(0xFF757575)
         )
         
         OutlinedTextField(
@@ -1718,14 +1619,14 @@ private fun DeviceNameStep(
             Text(
                 text = "Suggestions:",
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                color = Color(0xFF757575)
             )
             suggestions.forEach { suggestion ->
                 TextButton(
                     onClick = { onDeviceNameChange(suggestion) },
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text(suggestion)
+                    Text(suggestion, color = Color(0xFF5C6BC0))
                 }
             }
         }
@@ -1754,14 +1655,15 @@ private fun PermissionsStep(
             text = "Permissions & Safety",
             style = MaterialTheme.typography.headlineSmall,
             fontWeight = FontWeight.Bold,
-            textAlign = TextAlign.Center
+            textAlign = TextAlign.Center,
+            color = Color(0xFF1A1A1A)
         )
         
         Text(
             text = "Enable these features for the best protection and experience.",
             style = MaterialTheme.typography.bodyMedium,
             textAlign = TextAlign.Center,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
+            color = Color(0xFF757575)
         )
         
         Card(
@@ -1821,7 +1723,7 @@ private fun PermissionToggleItem(
         Icon(
             icon,
             contentDescription = null,
-            tint = MaterialTheme.colorScheme.primary,
+            tint = Color(0xFF5C6BC0),
             modifier = Modifier.size(24.dp)
         )
         
@@ -1831,18 +1733,22 @@ private fun PermissionToggleItem(
             Text(
                 text = title,
                 style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold
+                fontWeight = FontWeight.Bold,
+                color = Color(0xFF1A1A1A)
             )
             Text(
                 text = description,
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                color = Color(0xFF757575)
             )
         }
         
         Switch(
             checked = enabled,
-            onCheckedChange = onToggle
+            onCheckedChange = onToggle,
+            colors = SwitchDefaults.colors(
+                checkedTrackColor = Color(0xFF5C6BC0)
+            )
         )
     }
 }
@@ -1867,20 +1773,21 @@ private fun CompleteSetupStep(
             text = "Setup Complete!",
             style = MaterialTheme.typography.headlineSmall,
             fontWeight = FontWeight.Bold,
-            textAlign = TextAlign.Center
+            textAlign = TextAlign.Center,
+            color = Color(0xFF1A1A1A)
         )
         
         Text(
             text = "Your device is ready to connect with your parents.",
             style = MaterialTheme.typography.bodyMedium,
             textAlign = TextAlign.Center,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
+            color = Color(0xFF757575)
         )
         
         Card(
             modifier = Modifier.fillMaxWidth(),
             colors = CardDefaults.cardColors(
-                containerColor = MaterialTheme.colorScheme.primaryContainer
+                containerColor = Color(0xFFE8EAF6)
             )
         ) {
             Column(
@@ -1889,13 +1796,14 @@ private fun CompleteSetupStep(
             ) {
                 Text(
                     text = "Setup Summary:",
-                    fontWeight = FontWeight.Bold
+                    fontWeight = FontWeight.Bold,
+                    color = Color(0xFF1A1A1A)
                 )
                 
-                Text("Device: $deviceName", fontSize = 14.sp)
-                Text("Notifications: ${if (notificationsEnabled) "Enabled" else "Disabled"}", fontSize = 14.sp)
-                Text("Location: ${if (locationEnabled) "Enabled" else "Disabled"}", fontSize = 14.sp)
-                Text("Usage Monitoring: ${if (usageMonitoringEnabled) "Enabled" else "Disabled"}", fontSize = 14.sp)
+                Text("Device: $deviceName", fontSize = 14.sp, color = Color(0xFF1A1A1A))
+                Text("Notifications: ${if (notificationsEnabled) "Enabled" else "Disabled"}", fontSize = 14.sp, color = Color(0xFF1A1A1A))
+                Text("Location: ${if (locationEnabled) "Enabled" else "Disabled"}", fontSize = 14.sp, color = Color(0xFF1A1A1A))
+                Text("Usage Monitoring: ${if (usageMonitoringEnabled) "Enabled" else "Disabled"}", fontSize = 14.sp, color = Color(0xFF1A1A1A))
             }
         }
         
@@ -1903,7 +1811,7 @@ private fun CompleteSetupStep(
             text = "Click 'Complete Setup' to generate your pairing code and connect with your parents.",
             style = MaterialTheme.typography.bodySmall,
             textAlign = TextAlign.Center,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
+            color = Color(0xFF757575)
         )
     }
 }
@@ -1922,7 +1830,7 @@ fun EditChildProfileDialog(
 
     AlertDialog(
         onDismissRequest = { if (!isSaving) onDismiss() },
-        title = { Text("Edit Profile") },
+        title = { Text("Edit Profile", color = Color(0xFF1A1A1A)) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
                 OutlinedTextField(
@@ -1952,12 +1860,13 @@ fun EditChildProfileDialog(
                         }
                     }
                 },
-                enabled = !isSaving && name.isNotBlank()
+                enabled = !isSaving && name.isNotBlank(),
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF5C6BC0))
             ) {
                 if (isSaving) {
                     CircularProgressIndicator(modifier = Modifier.size(24.dp), strokeWidth = 2.dp, color = Color.White)
                 } else {
-                    Text("Save")
+                    Text("Save", color = Color.White)
                 }
             }
         },
@@ -1966,7 +1875,7 @@ fun EditChildProfileDialog(
                 onClick = onDismiss,
                 enabled = !isSaving
             ) {
-                Text("Cancel")
+                Text("Cancel", color = Color(0xFF757575))
             }
         }
     )
@@ -1996,9 +1905,6 @@ fun StudyModeBanner(config: com.example.safe_kids.data.StudyModeConfig) {
                 }
                 
                 var diff = endCalendar.timeInMillis - now.timeInMillis
-                
-                // If diff is negative, it might be for tomorrow, but Study Mode is active 
-                // only during scheduled hours. So if we are here, it should be today.
                 if (diff <= 0) {
                     timeRemaining = "Ending..."
                     break
@@ -2017,7 +1923,7 @@ fun StudyModeBanner(config: com.example.safe_kids.data.StudyModeConfig) {
 
     Card(
         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
+        colors = CardDefaults.cardColors(containerColor = Color(0xFFE8EAF6)),
         shape = RoundedCornerShape(16.dp),
         elevation = CardDefaults.cardElevation(4.dp)
     ) {
@@ -2028,29 +1934,29 @@ fun StudyModeBanner(config: com.example.safe_kids.data.StudyModeConfig) {
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Column {
-                    Text("Study Mode Active", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onPrimaryContainer)
-                    Text("Time Remaining: $timeRemaining", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.ExtraBold)
+                    Text("Study Mode Active", fontWeight = FontWeight.Bold, color = Color(0xFF1A1A1A))
+                    Text("Time Remaining: $timeRemaining", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.ExtraBold, color = Color(0xFF1A1A1A))
                 }
-                Icon(Icons.Default.MenuBook, null, modifier = Modifier.size(32.dp), tint = MaterialTheme.colorScheme.primary)
+                Icon(Icons.Default.MenuBook, null, modifier = Modifier.size(32.dp), tint = Color(0xFF5C6BC0))
             }
             
             if (config.allowedApps.isNotEmpty()) {
                 Spacer(Modifier.height(12.dp))
-                Text("Allowed Apps:", style = MaterialTheme.typography.labelMedium, color = Color.Gray)
+                Text("Allowed Apps:", style = MaterialTheme.typography.labelMedium, color = Color(0xFF757575))
                 Row(modifier = Modifier.padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     config.allowedApps.take(4).forEach { pkg ->
                         Surface(
                             modifier = Modifier.size(24.dp),
                             shape = CircleShape,
-                            color = Color.White.copy(alpha = 0.5f)
+                            color = Color(0xFF5C6BC0).copy(alpha = 0.2f)
                         ) {
                            Box(contentAlignment = Alignment.Center) {
-                               Icon(Icons.Default.Apps, null, modifier = Modifier.size(14.dp))
+                               Icon(Icons.Default.Apps, null, modifier = Modifier.size(14.dp), tint = Color(0xFF5C6BC0))
                            }
                         }
                     }
                     if (config.allowedApps.size > 4) {
-                        Text("+${config.allowedApps.size - 4} more", style = MaterialTheme.typography.labelSmall)
+                        Text("+${config.allowedApps.size - 4} more", style = MaterialTheme.typography.labelSmall, color = Color(0xFF757575))
                     }
                 }
             }
@@ -2062,7 +1968,7 @@ fun StudyModeBanner(config: com.example.safe_kids.data.StudyModeConfig) {
 fun StudyModeCompletionDialog(duration: Int, onDismiss: () -> Unit) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Study Session Complete!") },
+        title = { Text("Study Session Complete!", color = Color(0xFF1A1A1A)) },
         text = {
             Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
                 Icon(Icons.Default.CheckCircle, null, tint = Color(0xFF4CAF50), modifier = Modifier.size(64.dp))
@@ -2070,18 +1976,21 @@ fun StudyModeCompletionDialog(duration: Int, onDismiss: () -> Unit) {
                 Text(
                     "Great job! You studied for $duration minutes.",
                     textAlign = TextAlign.Center,
-                    style = MaterialTheme.typography.bodyLarge
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = Color(0xFF1A1A1A)
                 )
                 Text(
                     "Normal application access has been restored.",
                     textAlign = TextAlign.Center,
                     style = MaterialTheme.typography.bodySmall,
-                    color = Color.Gray
+                    color = Color(0xFF757575)
                 )
             }
         },
         confirmButton = {
-            Button(onClick = onDismiss) { Text("Awesome!") }
+            Button(onClick = onDismiss, colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF4CAF50))) {
+                Text("Awesome!", color = Color.White)
+            }
         }
     )
 }
@@ -2101,7 +2010,7 @@ fun SleepModeBanner(config: com.example.safe_kids.data.SleepModeConfig) {
 
     Card(
         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
-        colors = CardDefaults.cardColors(containerColor = if (emergencyTimeLeft > 0) Color(0xFFFF9800) else Color(0xFF3F51B5)),
+        colors = CardDefaults.cardColors(containerColor = if (emergencyTimeLeft > 0) Color(0xFFFFF3E0) else Color(0xFFE8EAF6)),
         shape = RoundedCornerShape(16.dp),
         elevation = CardDefaults.cardElevation(4.dp)
     ) {
@@ -2112,16 +2021,16 @@ fun SleepModeBanner(config: com.example.safe_kids.data.SleepModeConfig) {
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Column {
-                    Text(if (emergencyTimeLeft > 0) "Emergency Usage Active" else "Sleep Mode Active", fontWeight = FontWeight.Bold, color = Color.White)
+                    Text(if (emergencyTimeLeft > 0) "Emergency Usage Active" else "Sleep Mode Active", fontWeight = FontWeight.Bold, color = Color(0xFF1A1A1A))
                     if (emergencyTimeLeft > 0) {
                         val minutes = (emergencyTimeLeft / 60000).toInt()
                         val seconds = ((emergencyTimeLeft % 60000) / 1000).toInt()
-                        Text("Ends in: ${String.format("%d:%02d", minutes, seconds)}", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.ExtraBold, color = Color.White)
+                        Text("Ends in: ${String.format("%d:%02d", minutes, seconds)}", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.ExtraBold, color = Color(0xFF1A1A1A))
                     } else {
-                        Text("Unlocks at: ${config.endTime}", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.ExtraBold, color = Color.White)
+                        Text("Unlocks at: ${config.endTime}", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.ExtraBold, color = Color(0xFF1A1A1A))
                     }
                 }
-                Icon(if (emergencyTimeLeft > 0) Icons.Default.Warning else Icons.Default.Bedtime, null, modifier = Modifier.size(32.dp), tint = Color.White)
+                Icon(if (emergencyTimeLeft > 0) Icons.Default.Warning else Icons.Default.Bedtime, null, modifier = Modifier.size(32.dp), tint = Color(0xFF5C6BC0))
             }
             
             if (emergencyTimeLeft <= 0) {
@@ -2132,7 +2041,7 @@ fun SleepModeBanner(config: com.example.safe_kids.data.SleepModeConfig) {
                         logSleepEmergency(context)
                     },
                     modifier = Modifier.fillMaxWidth(),
-                    colors = ButtonDefaults.buttonColors(containerColor = Color.White.copy(alpha = 0.2f)),
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF5C6BC0)),
                     contentPadding = PaddingValues(0.dp)
                 ) {
                     Text("Emergency Override (5 min)", color = Color.White, fontSize = 14.sp)

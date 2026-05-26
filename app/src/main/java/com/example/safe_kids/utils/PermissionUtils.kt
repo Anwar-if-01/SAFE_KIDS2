@@ -211,4 +211,12 @@ object PermissionUtils {
         }
         return hasPermissions(context, base + media + bgLocation)
     }
+
+    fun isBatteryOptimizationIgnored(context: Context): Boolean {
+        return isIgnoringBatteryOptimizations(context)
+    }
+
+    fun hasSmsPermission(context: Context): Boolean {
+        return hasSmsPermissions(context)
+    }
 }

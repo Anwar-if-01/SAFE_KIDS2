@@ -5,6 +5,8 @@ import android.content.pm.PackageManager
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.safe_kids.data.RestrictionRepository
+import com.google.firebase.firestore.FirebaseFirestore
+import com.example.safe_kids.auth.AuthConfig
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 
@@ -15,9 +17,52 @@ class ChildModeViewModel(
 
     private val _allowedApps = MutableStateFlow<List<String>>(emptyList())
     val allowedApps: StateFlow<List<String>> = _allowedApps.asStateFlow()
+    
+    private val _firestoreAllowedApps = MutableStateFlow<List<String>>(emptyList())
+    val firestoreAllowedApps: StateFlow<List<String>> = _firestoreAllowedApps.asStateFlow()
+    
+    private val _hasParentSetApps = MutableStateFlow(false)
+    val hasParentSetApps: StateFlow<Boolean> = _hasParentSetApps.asStateFlow()
 
     init {
         observeRestrictions()
+    }
+
+    /**
+     * FIX 1: Read allowed apps from Firestore children/{childId}/allowedApps
+     * Only show apps where allowed = true
+     * If parent has not set any allowed apps yet, show "No apps approved" message
+     */
+    fun observeFirestoreAllowedApps(childId: String) {
+        viewModelScope.launch {
+            FirebaseFirestore.getInstance()
+                .collection(AuthConfig.APP_USAGE_LIMITS_COLLECTION)
+                .document(childId)
+                .addSnapshotListener { snapshot, error ->
+                    if (error != null) {
+                        _hasParentSetApps.value = false
+                        _firestoreAllowedApps.value = emptyList()
+                        return@addSnapshotListener
+                    }
+
+                    if (snapshot != null && snapshot.exists()) {
+                        val approvedPkgs = snapshot.get("alwaysAllowedApps") as? List<String> ?: emptyList()
+                        val approved = approvedPkgs.mapNotNull { packageName ->
+                            try {
+                                val pm = context.packageManager
+                                pm.getApplicationLabel(pm.getApplicationInfo(packageName, 0)).toString()
+                            } catch (e: Exception) {
+                                packageName
+                            }
+                        }
+                        _hasParentSetApps.value = approved.isNotEmpty()
+                        _firestoreAllowedApps.value = approved
+                    } else {
+                        _hasParentSetApps.value = false
+                        _firestoreAllowedApps.value = emptyList()
+                    }
+                }
+        }
     }
 
     private fun observeRestrictions() {

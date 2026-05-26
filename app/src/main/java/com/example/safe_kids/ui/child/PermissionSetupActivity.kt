@@ -40,6 +40,7 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.lifecycleScope
 import com.example.safe_kids.MainActivity
 import com.example.safe_kids.auth.AuthManagerImpl
 import com.example.safe_kids.services.DeviceAdminService
@@ -80,23 +81,33 @@ class PermissionSetupActivity : ComponentActivity() {
     }
 
     private fun navigateToMainApp(setupCompleted: Boolean) {
-        if (setupCompleted) {
-            sharedPreferences.edit().putBoolean("setupComplete", true).apply()
-            // Start ForegroundProtectionService after setup is complete
-            val serviceIntent = Intent(this, ForegroundProtectionService::class.java)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                startForegroundService(serviceIntent)
-            } else {
-                @Suppress("DEPRECATION")
-                startService(serviceIntent)
+        lifecycleScope.launch {
+            if (setupCompleted) {
+                val currentUser = authManager.currentUser.value
+                if (currentUser?.role == com.example.safe_kids.auth.UserRole.CHILD) {
+                    authManager.updateUserProfile(mapOf(
+                        "isOnboardingComplete" to true,
+                        "isPaired" to true,
+                        "onboardingStep" to "COMPLETED"
+                    ))
+                }
+                sharedPreferences.edit().putBoolean("setupComplete", true).apply()
+                // Start ForegroundProtectionService after setup is complete
+                val serviceIntent = Intent(this@PermissionSetupActivity, ForegroundProtectionService::class.java)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    startForegroundService(serviceIntent)
+                } else {
+                    @Suppress("DEPRECATION")
+                    startService(serviceIntent)
+                }
             }
-        }
 
-        val intent = Intent(this, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+            val intent = Intent(this@PermissionSetupActivity, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+            }
+            startActivity(intent)
+            finish()
         }
-        startActivity(intent)
-        finish()
     }
 }
 

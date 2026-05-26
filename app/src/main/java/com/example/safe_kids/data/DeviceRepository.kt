@@ -22,32 +22,28 @@ class DeviceRepository {
     private val firestore = FirebaseFirestore.getInstance()
 
     fun getDeviceStatusFlow(childId: String): Flow<ChildDeviceStatus> = callbackFlow {
-        val db = FirebaseFirestore.getInstance()
-        // Read from child_presence/{childId} — this is what ForegroundProtectionService writes to
-        val rtdb = FirebaseDatabase.getInstance().getReference("child_presence/$childId")
-        
         var lastUser: User? = null
         var lastIsOnline: Boolean = false
         var lastSeen: Long = 0L
         
         fun emitStatus() {
             val user = lastUser ?: return
-            // Online if RTDB says online OR lastSeen is within 90 seconds
-            val isOnline = lastIsOnline || (System.currentTimeMillis() - lastSeen) < 90_000
             
             val status = ChildDeviceStatus(
-                deviceName = user.deviceName ?: "Child Device",
+                deviceName = user.deviceName.takeUnless { it.isNullOrBlank() }
+                    ?: user.displayName.takeUnless { it.isNullOrBlank() }
+                    ?: "Child Device",
                 batteryPercentage = user.batteryPercentage,
                 connectionType = user.connectionType,
                 wifiName = user.wifiName,
                 lastActive = if (lastSeen > 0L) lastSeen else user.lastActive,
-                isOnline = isOnline
+                isOnline = lastIsOnline
             )
             trySend(status)
         }
 
         // Firestore listener for metadata (battery, wifi name, device name, etc.)
-        val firestoreRegistration = db.collection(AuthConfig.USERS_COLLECTION)
+        val firestoreRegistration = firestore.collection(AuthConfig.USERS_COLLECTION)
             .document(childId)
             .addSnapshotListener { snapshot, error ->
                 if (error != null) {
@@ -60,22 +56,24 @@ class DeviceRepository {
                 }
             }
             
-        // RTDB listener for real-time presence — reads child_presence/{childId}/isOnline and lastSeen
-        val rtdbListener = object : com.google.firebase.database.ValueEventListener {
-            override fun onDataChange(snapshot: com.google.firebase.database.DataSnapshot) {
-                lastIsOnline = snapshot.child("isOnline").getValue(Boolean::class.java) ?: false
-                lastSeen = snapshot.child("lastSeen").getValue(Long::class.java) ?: 0L
-                emitStatus()
+        // Firestore listener for children/{childId} (Single Source of Truth)
+        val childrenRegistration = firestore.collection("children")
+            .document(childId)
+            .addSnapshotListener { snapshot, error ->
+                if (error != null) {
+                    android.util.Log.e("DeviceRepository", "Children listener error", error)
+                    return@addSnapshotListener
+                }
+                if (snapshot != null && snapshot.exists()) {
+                    lastIsOnline = snapshot.getBoolean("isOnline") ?: false
+                    lastSeen = snapshot.getLong("lastSeen") ?: 0L
+                    emitStatus()
+                }
             }
-            override fun onCancelled(error: com.google.firebase.database.DatabaseError) {
-                android.util.Log.e("DeviceRepository", "RTDB listener error", error.toException())
-            }
-        }
-        rtdb.addValueEventListener(rtdbListener)
         
         awaitClose {
             firestoreRegistration.remove()
-            rtdb.removeEventListener(rtdbListener)
+            childrenRegistration.remove()
         }
     }
     

@@ -138,8 +138,8 @@ interface AuthManager {
     
     // User management
     fun getCurrentUser(): User?
-    suspend fun updateUserProfile(updates: Map<String, Any>, targetUserId: String? = null): Result<Boolean>
-    suspend fun updateChildProfile(childId: String, updates: Map<String, Any>): Result<Boolean>
+    suspend fun updateUserProfile(updates: Map<String, Any?>, targetUserId: String? = null): Result<Boolean>
+    suspend fun updateChildProfile(childId: String, updates: Map<String, Any?>): Result<Boolean>
     suspend fun updateUserPreferences(preferences: UserPreferences): Result<Boolean>
     
     // Account Lifecycle
@@ -650,15 +650,16 @@ class AuthManagerImpl(private val context: Context) : AuthManager {
                 )
                 .await()
             
-            // Update child's parent list and mark onboarding as complete
+            // Update child's parent list and preserve onboarding until permissions are completed.
             firestore.collection(AuthConfig.USERS_COLLECTION)
                 .document(childId)
                 .set(
                     mapOf(
                         "parentIds" to FieldValue.arrayUnion(parentId),
                         "parentUid" to parentId,
-                        "isOnboardingComplete" to true
-                    ), 
+                        "isPaired" to true,
+                        "onboardingStep" to "PERMISSIONS"
+                    ),
                     SetOptions.merge()
                 )
                 .await()
@@ -898,11 +899,34 @@ class AuthManagerImpl(private val context: Context) : AuthManager {
         }
         
         return try {
-            val result = updateUserProfile(mapOf("adminCode" to code))
-            if (result.isSuccess) {
-                sessionManager.setAdminCode(code)
+            // Write adminCode and parentalPin to the parent's user document so children can look it up
+            val userId = currentUser.id
+            val updates = mutableMapOf<String, Any?>("adminCode" to code)
+            if (code.isNotEmpty()) {
+                updates["parentalPin"] = code
+            } else {
+                updates["parentalPin"] = null as String?
             }
-            result
+
+            try {
+                firestore.collection(AuthConfig.USERS_COLLECTION)
+                    .document(userId)
+                    .set(updates, SetOptions.merge())
+                    .await()
+                Log.d(TAG, "Saving PIN to path: users/$userId/parentalPin")
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to write parentalPin to users/$userId", e)
+            }
+
+            // Persist locally
+            sessionManager.setAdminCode(code)
+
+            // Also ensure the user's in-memory object reflects the change
+            try {
+                refreshUserData()
+            } catch (_: Exception) {}
+
+            Result.success(true)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to set parental PIN", e)
             Result.failure(e)
@@ -911,21 +935,46 @@ class AuthManagerImpl(private val context: Context) : AuthManager {
 
 
     override suspend fun verifyAdminCode(code: String): Boolean {
+        val currentUser = _currentUser.value
+        
+        if (currentUser?.role == UserRole.CHILD && currentUser.parentIds.isNotEmpty()) {
+            val parentId = currentUser.parentIds.first()
+            try {
+                Log.d(TAG, "Reading PIN from path: users/$parentId/parentalPin")
+                val parentDoc = firestore.collection("users").document(parentId).get().await()
+                val storedPin = parentDoc.getString("parentalPin") ?: parentDoc.getString("adminCode")
+                Log.d(TAG, "Stored PIN: $storedPin, Entered PIN: $code")
+                if (!storedPin.isNullOrEmpty() && storedPin == code) return true
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to read PIN from parent", e)
+            }
+            return false
+        }
+        
         // Fast path: Check local secure storage
         val localCode = sessionManager.getAdminCode()
-        if (!localCode.isNullOrEmpty()) {
-            return localCode == code
+        if (!localCode.isNullOrEmpty() && localCode == code) return true
+        
+        if (currentUser != null) {
+            try {
+                Log.d(TAG, "Reading PIN from path: users/${currentUser.id}/parentalPin")
+                val doc = firestore.collection("users").document(currentUser.id).get().await()
+                val storedPin = doc.getString("parentalPin") ?: doc.getString("adminCode")
+                Log.d(TAG, "Stored PIN: $storedPin, Entered PIN: $code")
+                if (!storedPin.isNullOrEmpty() && storedPin == code) return true
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to read own PIN", e)
+            }
         }
-        // Fallback to active memory
-        val currentUser = _currentUser.value ?: return false
-        return currentUser.adminCode == code
+        
+        return false
     }
 
     override fun getCurrentUser(): User? {
         return _currentUser.value
     }
 
-    override suspend fun updateUserProfile(updates: Map<String, Any>, targetUserId: String?): Result<Boolean> {
+    override suspend fun updateUserProfile(updates: Map<String, Any?>, targetUserId: String?): Result<Boolean> {
         val userId = targetUserId ?: _currentUser.value?.id ?: return Result.failure(Exception("User not authenticated"))
         
         Log.d(TAG, "Attempting profile update for $userId")
@@ -953,7 +1002,7 @@ class AuthManagerImpl(private val context: Context) : AuthManager {
         }
     }
 
-    override suspend fun updateChildProfile(childId: String, updates: Map<String, Any>): Result<Boolean> {
+    override suspend fun updateChildProfile(childId: String, updates: Map<String, Any?>): Result<Boolean> {
         return try {
             firestore.collection(AuthConfig.CHILD_PROFILES_COLLECTION).document(childId).update(updates).await()
             Result.success(true)

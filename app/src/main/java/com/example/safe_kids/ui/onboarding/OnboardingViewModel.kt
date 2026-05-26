@@ -86,10 +86,16 @@ class OnboardingViewModel(
         val profileDone = sessionManager.isProfileCompleted()
         val pairingDone = sessionManager.isDevicePaired()
         val permissionsDone = sessionManager.arePermissionsGranted()
-        val shouldCheckPermissions = user?.role != UserRole.CHILD
+        
+        // IMPORTANT: ALL users (including children) MUST grant permissions first
+        // This is a critical security requirement for SafeKids
+        val shouldCheckPermissions = true
 
         _currentStep.value = when {
-            shouldCheckPermissions && !permissionsDone -> OnboardingStep.PERMISSIONS
+            !permissionsDone -> {
+                android.util.Log.d("OnboardingViewModel", "Permissions not done. Current role: ${user?.role}")
+                OnboardingStep.PERMISSIONS
+            }
             !profileDone -> OnboardingStep.PROFILE_SETUP
             user?.role == UserRole.CO_PARENT && !pairingDone -> OnboardingStep.CO_PARENT_INVITE
             !pairingDone -> OnboardingStep.DEVICE_PAIRING

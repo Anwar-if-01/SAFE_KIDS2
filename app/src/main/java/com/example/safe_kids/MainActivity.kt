@@ -3,6 +3,7 @@ package com.example.safe_kids
 
 import android.content.Intent
 import android.os.Bundle
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -84,12 +85,12 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         
         // Initialize Firebase Realtime Database with correct regional URL
-        com.google.firebase.database.FirebaseDatabase.getInstance()
-            .setPersistenceEnabled(true)
         try {
-            com.google.firebase.database.FirebaseDatabase.getInstance("https://safe-kids-cf8a6-default-rtdb.europe-west1.firebasedatabase.app")
+            val database = com.example.safe_kids.utils.FirebaseUtils.getRealtimeDatabase()
+            database.setPersistenceEnabled(true)
+            android.util.Log.d("MainActivity", "Firebase RTDB initialized successfully")
         } catch (e: Exception) {
-            android.util.Log.w("MainActivity", "Firebase RTDB already initialized or error setting URL", e)
+            android.util.Log.e("MainActivity", "Firebase RTDB initialization error", e)
         }
         
         authManager = AuthManagerImpl(this)
@@ -235,7 +236,7 @@ val currentUser = currentUserState.value
                 // Initialize Realtime Database presence for child users
                 LaunchedEffect(currentUser) {
                     if (currentUser != null && currentUser.role == UserRole.CHILD) {
-                        val database = com.google.firebase.database.FirebaseDatabase.getInstance()
+                        val database = com.example.safe_kids.utils.FirebaseUtils.getRealtimeDatabase()
                         val presenceRef = database.getReference("child_presence/${currentUser.id}/isOnline")
                         val connectedRef = database.getReference(".info/connected")
                         
@@ -2261,24 +2262,25 @@ fun BindingCodeScreen(
     // When Firestore detects isUsed=true on the pairing code doc, show the confirmation step
     DisposableEffect(currentUser?.id) {
         val uid = currentUser?.id ?: return@DisposableEffect onDispose {}
-        android.util.Log.d("BindingCodeScreen", "Starting pairing code listener for UID: $uid")
+        Log.d("PairingFlow", "BindingCodeScreen: Starting pairing code listener for UID: $uid")
         
         val registration = com.google.firebase.firestore.FirebaseFirestore.getInstance()
             .collection(com.example.safe_kids.auth.AuthConfig.PAIRING_CODES_COLLECTION)
             .document(uid)
             .addSnapshotListener { snapshot, e ->
                 if (e != null) {
-                    android.util.Log.e("BindingCodeScreen", "Pairing code listener error", e)
+                    Log.e("PairingFlow", "BindingCodeScreen: Pairing code listener error", e)
                     return@addSnapshotListener
                 }
                 
                 if (snapshot != null && snapshot.exists()) {
                     val isUsed = snapshot.getBoolean("isUsed") == true
                     val status = snapshot.getString("status")
-                    android.util.Log.d("BindingCodeScreen", "Pairing code update: isUsed=$isUsed, status=$status")
+                    Log.d("PairingFlow", "BindingCodeScreen: Pairing code update: isUsed=$isUsed, status=$status")
                     
                     // Instead of navigating immediately, show the confirmation step
                     if (isUsed || status == "connected") {
+                        Log.d("PairingFlow", "BindingCodeScreen: Pairing confirmed! Showing confirmation UI")
                         isPairingConfirmed = true
                         waitingForParent = false
                         isSaving = false
@@ -2287,7 +2289,7 @@ fun BindingCodeScreen(
             }
 
         onDispose { 
-            android.util.Log.d("BindingCodeScreen", "Removing pairing code listener")
+            Log.d("PairingFlow", "BindingCodeScreen: Removing pairing code listener")
             registration.remove() 
         }
     }
@@ -2295,17 +2297,17 @@ fun BindingCodeScreen(
     // When user doc confirms linking, also show confirmation step instead of auto-navigating
     LaunchedEffect(isPaired) {
         if (isPaired && !isPairingConfirmed) {
-            android.util.Log.d("BindingCodeScreen", "Device already paired via user doc. Showing confirmation step.")
+            Log.d("PairingFlow", "BindingCodeScreen: Device already paired via user doc. Showing confirmation step.")
             isPairingConfirmed = true
             waitingForParent = false
             isSaving = false
         }
     }
 
-    // 120-second timeout while waiting for parent to scan
+    // 10-second timeout while waiting for parent to scan
     LaunchedEffect(waitingForParent) {
         if (!waitingForParent) return@LaunchedEffect
-        kotlinx.coroutines.delay(120_000)
+        kotlinx.coroutines.delay(10_000)
         if (!isPaired) {
             timedOut = true
             waitingForParent = false
@@ -2319,24 +2321,62 @@ fun BindingCodeScreen(
             errorMsg = null
             timedOut = false
             waitingForParent = false
+            Log.d("PairingFlow", "BindingCodeScreen: Starting code generation")
             try {
                 val result = authManager.generatePairingCode()
                 if (result.isSuccess) {
                     pairingCode = result.getOrNull() ?: "---------"
+                    Log.d("PairingFlow", "BindingCodeScreen: Code generated successfully: $pairingCode")
+                    
+                    // FIX #2: Update Firestore to mark onboarding step
+                    val childId = currentUser?.id
+                    if (childId != null) {
+                        try {
+                            FirebaseFirestore.getInstance()
+                                .collection("users")
+                                .document(childId)
+                                .update(mapOf(
+                                    "onboardingStep" to "DEVICE_PAIRING",
+                                    "lastUpdated" to System.currentTimeMillis()
+                                ))
+                            Log.d("PairingFlow", "BindingCodeScreen: Updated onboardingStep to DEVICE_PAIRING")
+                        } catch (e: Exception) {
+                            Log.e("PairingFlow", "BindingCodeScreen: Failed to update onboardingStep", e)
+                        }
+                    }
                 } else {
                     errorMsg = result.exceptionOrNull()?.message ?: "Failed to generate code"
-                    android.util.Log.e("BindingCodeScreen", "Code generation failed: $errorMsg")
+                    Log.e("PairingFlow", "BindingCodeScreen: Code generation failed: $errorMsg")
                 }
             } catch (e: Exception) {
                 errorMsg = e.message ?: "An unexpected error occurred"
-                android.util.Log.e("BindingCodeScreen", "Error during code generation", e)
+                Log.e("PairingFlow", "BindingCodeScreen: Error during code generation", e)
             } finally {
                 isLoading = false
             }
         }
     }
 
+    // FIX #2: Start ChildPairingListener when code is generated
+    // This monitors Firestore for pairing completion and auto-navigates to ChildDashboardActivity
+    LaunchedEffect(currentUser?.id) {
+        val childId = currentUser?.id
+        if (childId != null) {
+            Log.d("PairingFlow", "Starting ChildPairingListener for childId: $childId")
+            com.example.safe_kids.ui.child.ChildPairingListener.startListening(context, childId)
+        }
+    }
+    
+    // Stop listener when screen is disposed
+    DisposableEffect(Unit) {
+        onDispose {
+            Log.d("PairingFlow", "Stopping ChildPairingListener")
+            com.example.safe_kids.ui.child.ChildPairingListener.stopListening()
+        }
+    }
+
     LaunchedEffect(Unit) {
+        Log.d("PairingFlow", "BindingCodeScreen: Generating pairing code")
         generateCode()
     }
 
@@ -2717,8 +2757,8 @@ fun ParentPairingScreen(
                         errorMsg = null
                         scope.launch {
                             try {
-                                // 60-second timeout — prevents infinite spinner on slow/offline network
-                                val result = kotlinx.coroutines.withTimeout(60_000) {
+                                // 10-second timeout — prevents infinite spinner on slow/offline network
+                                val result = kotlinx.coroutines.withTimeout(10_000) {
                                     authManager.usePairingCode(pairingCode, currentUser?.id ?: "")
                                 }
                                 if (result.isSuccess) {

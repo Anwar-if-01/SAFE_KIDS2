@@ -154,7 +154,7 @@ class ChatActivity : AppCompatActivity() {
     }
     
     private fun startPresenceTracking() {
-        val database = com.google.firebase.database.FirebaseDatabase.getInstance()
+        val database = com.example.safe_kids.utils.FirebaseUtils.getRealtimeDatabase()
         val presenceRef = database.getReference("child_presence/$otherUserId")
         
         presenceListener = object : com.google.firebase.database.ValueEventListener {
@@ -193,7 +193,7 @@ class ChatActivity : AppCompatActivity() {
         super.onDestroy()
         messageListener?.remove()
         presenceListener?.let {
-            com.google.firebase.database.FirebaseDatabase.getInstance()
+            com.example.safe_kids.utils.FirebaseUtils.getRealtimeDatabase()
                 .getReference("child_presence/$otherUserId")
                 .removeEventListener(it)
         }

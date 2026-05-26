@@ -397,7 +397,7 @@ class ChildLocationMapActivity : AppCompatActivity(), OnMapReadyCallback {
     }
 
     private fun startPresenceTracking() {
-        val database = FirebaseDatabase.getInstance()
+        val database = com.example.safe_kids.utils.FirebaseUtils.getRealtimeDatabase()
         val presenceRef = database.getReference("child_presence/$childId")
         
         presenceListener = object : com.google.firebase.database.ValueEventListener {
@@ -452,7 +452,7 @@ class ChildLocationMapActivity : AppCompatActivity(), OnMapReadyCallback {
         super.onDestroy()
         locationListener?.remove()
         presenceListener?.let {
-            FirebaseDatabase.getInstance().getReference("child_presence/$childId").removeEventListener(it)
+            com.example.safe_kids.utils.FirebaseUtils.getRealtimeDatabase().getReference("child_presence/$childId").removeEventListener(it)
         }
 
         try {

@@ -105,6 +105,26 @@ class ParentDashboardViewModel : ViewModel() {
                 }
                 .collect { status ->
                     _deviceStatus.value = status
+                    
+                    val lastSeen = status.lastActive
+                    val isOnline = status.isOnline
+                    
+                    _lastActiveFormatted.value = when {
+                        lastSeen == 0L -> "Offline"
+                        isOnline && (System.currentTimeMillis() - lastSeen) <= 2 * 60 * 1000L -> "Online Now"
+                        (System.currentTimeMillis() - lastSeen) <= 60 * 60 * 1000L -> {
+                            val mins = ((System.currentTimeMillis() - lastSeen) / (60 * 1000)).toInt()
+                            if (mins <= 1) "Just now" else "$mins minutes ago"
+                        }
+                        isSameDay(lastSeen, System.currentTimeMillis()) -> {
+                            val sdf = SimpleDateFormat("h:mm a", Locale.getDefault())
+                            "Today at ${sdf.format(Date(lastSeen))}"
+                        }
+                        else -> {
+                            val days = ((System.currentTimeMillis() - lastSeen) / (24 * 60 * 60 * 1000)).toInt()
+                            if (days == 1) "Yesterday" else "Last seen ${days} days ago"
+                        }
+                    }
                 }
         }
 
@@ -236,62 +256,7 @@ class ParentDashboardViewModel : ViewModel() {
             listeners.add(notifRegistration)
         }
 
-        // FIX 5+6: Online/Offline status from RTDB + Firestore
-        viewModelScope.launch {
-            // Listen to child_presence/{childId} from RTDB for isOnline
-            val database = com.google.firebase.database.FirebaseDatabase.getInstance()
-            val presenceRef = database.getReference("child_presence/$childId")
-            
-            val presenceListener = object : com.google.firebase.database.ValueEventListener {
-                override fun onDataChange(snapshot: com.google.firebase.database.DataSnapshot) {
-                    val isOnline = snapshot.child("isOnline").getValue(Boolean::class.java) ?: false
-                    val lastSeen = snapshot.child("lastSeen").getValue(Long::class.java) ?: 0L
-                    
-                    val currentStatus = _deviceStatus.value
-                    _deviceStatus.value = currentStatus.copy(isOnline = isOnline)
-                    
-                    _lastActiveFormatted.value = when {
-                        lastSeen == 0L -> "Never"
-                        isOnline -> "Active Now"
-                        else -> {
-                            val diff = System.currentTimeMillis() - lastSeen
-                            val minutes = diff / (60 * 1000)
-                            when {
-                                minutes < 1 -> "Just now"
-                                minutes < 60 -> "$minutes min ago"
-                                minutes < 1440 -> "${minutes / 60} hours ago"
-                                else -> {
-                                    val sdf = SimpleDateFormat("h:mm a", Locale.getDefault())
-                                    "Today at ${sdf.format(Date(lastSeen))}"
-                                }
-                            }
-                        }
-                    }
-                }
-                
-                override fun onCancelled(error: com.google.firebase.database.DatabaseError) {
-                    android.util.Log.e("ParentDashboardVM", "Presence listener cancelled", error.toException())
-                }
-            }
-            
-            presenceRef.addValueEventListener(presenceListener)
-            
-            // Also listen to child_profiles/{childId} for Firestore-based isOnline
-            val firestoreListener = firestore.collection("child_profiles")
-                .document(childId)
-                .addSnapshotListener { snapshot, _ ->
-                    if (snapshot != null && snapshot.exists()) {
-                        val isOnline = snapshot.getBoolean("isOnline") ?: false
-                        val lastSeen = snapshot.getLong("lastSeen") ?: 0L
-                        // Only update if RTDB didn't have data (fallback)
-                        val currentStatus = _deviceStatus.value
-                        if (lastSeen > 0 && !currentStatus.isOnline) {
-                            _deviceStatus.value = currentStatus.copy(isOnline = isOnline)
-                        }
-                    }
-                }
-            listeners.add(firestoreListener)
-        }
+
 
         // FIX 4: Weekly usage from Firestore
         fetchWeeklyUsage(childId)
@@ -356,59 +321,33 @@ class ParentDashboardViewModel : ViewModel() {
 
     private fun fetchWeeklyUsage(childId: String) {
         viewModelScope.launch {
-            try {
-                val cal = Calendar.getInstance()
-                val history = mutableListOf<DailyUsage>()
-                val dayFormatter = SimpleDateFormat("EEE", Locale.getDefault())
-                val dateFormatter = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
+            val dayFormatter = SimpleDateFormat("EEE", Locale.getDefault())
+            val dateFormatter = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
 
-                // Fetch from usage_history/{childId}/days/{date} for last 7 days
-                val daysToFetch = 7
-                val results = (0 until daysToFetch).map { i ->
-                    val dayCal = Calendar.getInstance().apply { add(Calendar.DAY_OF_YEAR, -i) }
-                    val dateStr = dateFormatter.format(dayCal.time)
-                    val dayName = dayFormatter.format(dayCal.time)
+            // Listen to the days collection
+            val registration = firestore.collection("usage_history")
+                .document(childId)
+                .collection("days")
+                .addSnapshotListener { snapshot, e ->
+                    if (e != null || snapshot == null) return@addSnapshotListener
                     
-                    try {
-                        val doc = firestore.collection("usage_history")
-                            .document(childId)
-                            .collection("days")
-                            .document(dateStr)
-                            .get()
-                            .await()
+                    val daysToFetch = 7
+                    val results = (0 until daysToFetch).map { i ->
+                        val dayCal = Calendar.getInstance().apply { add(Calendar.DAY_OF_YEAR, -i) }
+                        val dateStr = dateFormatter.format(dayCal.time)
+                        val dayName = dayFormatter.format(dayCal.time)
                         
-                        if (doc.exists()) {
-                            val totalDuration = doc.getLong("totalDuration") ?: 0L
-                            Pair(dayName, totalDuration)
-                        } else {
-                            // Fallback: try children/{childId}/usageStats/_summary
-                            try {
-                                val summaryDoc = firestore.collection("children")
-                                    .document(childId)
-                                    .collection("usageStats")
-                                    .document("_summary")
-                                    .get()
-                                    .await()
-                                if (summaryDoc.exists() && summaryDoc.getString("date") == dateStr) {
-                                    Pair(dayName, summaryDoc.getLong("totalDailyMs") ?: 0L)
-                                } else {
-                                    Pair(dayName, 0L)
-                                }
-                            } catch (e: Exception) {
-                                Pair(dayName, 0L)
-                            }
-                        }
-                    } catch (e: Exception) {
-                        Pair(dayName, 0L)
+                        val doc = snapshot.documents.find { it.id == dateStr }
+                        val totalDuration = doc?.getLong("totalDuration") ?: 0L
+                        Pair(dayName, totalDuration)
                     }
+                    
+                    // Fallback to today's summary is handled live by summaryJob anyway, 
+                    // but we can just use the usage_history total here for consistency.
+                    val dailyUsage = results.map { DailyUsage(it.first, it.second / (1000f * 60 * 60)) }.reversed()
+                    _weeklyUsage.value = dailyUsage
                 }
-                
-                val dailyUsage = results.map { DailyUsage(it.first, it.second / (1000f * 60 * 60)) }.reversed()
-                _weeklyUsage.value = dailyUsage
-            } catch (e: Exception) {
-                android.util.Log.e("ParentDashboardVM", "Failed to fetch weekly usage", e)
-                _weeklyUsage.value = emptyList()
-            }
+            listeners.add(registration)
         }
     }
 
@@ -465,6 +404,13 @@ class ParentDashboardViewModel : ViewModel() {
                 trySend(count)
             }
         awaitClose { listener.remove() }
+    }
+
+    private fun isSameDay(ts1: Long, ts2: Long): Boolean {
+        val cal1 = Calendar.getInstance().apply { timeInMillis = ts1 }
+        val cal2 = Calendar.getInstance().apply { timeInMillis = ts2 }
+        return cal1.get(Calendar.YEAR) == cal2.get(Calendar.YEAR)
+                && cal1.get(Calendar.DAY_OF_YEAR) == cal2.get(Calendar.DAY_OF_YEAR)
     }
     
     fun requestScreenshot(childId: String, parentId: String) {

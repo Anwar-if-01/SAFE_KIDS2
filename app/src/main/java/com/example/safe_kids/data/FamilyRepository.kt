@@ -26,6 +26,30 @@ class FamilyRepository {
         awaitClose { listener.remove() }
     }
 
+    fun getMessagesByChatId(chatId: String): Flow<List<ChatMessage>> = callbackFlow {
+        val listener = firestore.collection("chats")
+            .document(chatId)
+            .collection("messages")
+            .orderBy("timestamp", Query.Direction.ASCENDING)
+            .addSnapshotListener { snapshot, error ->
+                if (error != null) {
+                    close(error)
+                    return@addSnapshotListener
+                }
+                val messages = snapshot?.toObjects(ChatMessage::class.java) ?: emptyList()
+                trySend(messages)
+            }
+        awaitClose { listener.remove() }
+    }
+
+    suspend fun sendMessageToChat(chatId: String, message: ChatMessage) {
+        firestore.collection("chats")
+            .document(chatId)
+            .collection("messages")
+            .add(message)
+            .await()
+    }
+
     suspend fun sendMessage(familyId: String, message: ChatMessage) {
         firestore.collection("chats")
             .document(familyId)

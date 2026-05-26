@@ -6,10 +6,10 @@ import com.example.safe_kids.services.blocking.AppMode
 
 // Enhanced data models
 data class ChildProfile(
-    val id: String,
-    val name: String,
-    val age: Int,
-    val parentIds: List<String>, // Support for multiple parents
+    val id: String = "",
+    val name: String = "",
+    val age: Int = 0,
+    val parentIds: List<String> = emptyList(), // Support for multiple parents
     // ---- Profile display fields (synced from User document) ----
     val profileImageUrl: String? = null,  // Firebase Storage URL or avatar identifier
     val deviceName: String? = null,

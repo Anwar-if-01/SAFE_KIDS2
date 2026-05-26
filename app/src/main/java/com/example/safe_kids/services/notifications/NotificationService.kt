@@ -165,8 +165,8 @@ class NotificationServiceImpl(private val context: Context) : NotificationServic
                 ),
                 NotificationChannel(
                     CHANNEL_FOCUS,
-                    "Focus & Study",
-                    "Focus mode, study mode, and wellbeing notifications",
+                    "Instant Block & Study",
+                    "Instant block, study mode, and wellbeing notifications",
                     NotificationManager.IMPORTANCE_DEFAULT
                 )
             )
@@ -240,14 +240,14 @@ class NotificationServiceImpl(private val context: Context) : NotificationServic
     override fun sendFocusModeNotification(isStarted: Boolean, duration: Long?) {
         val message = if (isStarted) {
             val minutes = duration?.let { it / (1000 * 60) } ?: 0
-            "Focus mode started for $minutes minutes"
+            "Instant block started for $minutes minutes"
         } else {
-            "Focus mode ended"
+            "Instant block ended"
         }
         
         val notification = SafeKidsNotification(
             id = "focus_${System.currentTimeMillis()}",
-            title = "Focus Mode",
+            title = "Instant Block",
             message = message,
             type = if (isStarted) NotificationType.FOCUS_MODE_STARTED else NotificationType.FOCUS_MODE_ENDED,
             timestamp = System.currentTimeMillis()
