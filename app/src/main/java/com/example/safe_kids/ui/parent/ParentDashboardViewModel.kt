@@ -324,28 +324,30 @@ class ParentDashboardViewModel : ViewModel() {
             val dayFormatter = SimpleDateFormat("EEE", Locale.getDefault())
             val dateFormatter = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
 
-            // Listen to the days collection
-            val registration = firestore.collection("usage_history")
+            val registration = firestore.collection("children")
                 .document(childId)
-                .collection("days")
+                .collection("usageStats")
                 .addSnapshotListener { snapshot, e ->
                     if (e != null || snapshot == null) return@addSnapshotListener
-                    
+
                     val daysToFetch = 7
+                    val dailyTotals = mutableMapOf<String, Long>()
+
+                    for (doc in snapshot.documents) {
+                        val date = doc.getString("date") ?: continue
+                        val durationMs = doc.getLong("dailyUsageMs") ?: 0L
+                        dailyTotals[date] = (dailyTotals[date] ?: 0L) + durationMs
+                    }
+
                     val results = (0 until daysToFetch).map { i ->
                         val dayCal = Calendar.getInstance().apply { add(Calendar.DAY_OF_YEAR, -i) }
                         val dateStr = dateFormatter.format(dayCal.time)
                         val dayName = dayFormatter.format(dayCal.time)
-                        
-                        val doc = snapshot.documents.find { it.id == dateStr }
-                        val totalDuration = doc?.getLong("totalDuration") ?: 0L
-                        Pair(dayName, totalDuration)
-                    }
-                    
-                    // Fallback to today's summary is handled live by summaryJob anyway, 
-                    // but we can just use the usage_history total here for consistency.
-                    val dailyUsage = results.map { DailyUsage(it.first, it.second / (1000f * 60 * 60)) }.reversed()
-                    _weeklyUsage.value = dailyUsage
+                        val totalMs = dailyTotals[dateStr] ?: 0L
+                        DailyUsage(dayName, totalMs / (1000f * 60 * 60))
+                    }.reversed()
+
+                    _weeklyUsage.value = results
                 }
             listeners.add(registration)
         }

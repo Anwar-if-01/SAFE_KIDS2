@@ -210,28 +210,107 @@ fun InviteCoParentDialog(
     onDismiss: () -> Unit
 ) {
     val coroutineScope = rememberCoroutineScope()
-    var inviteEmail by remember { mutableStateOf("") }
     var inviteCode by remember { mutableStateOf<String?>(null) }
     var isGenerating by remember { mutableStateOf(false) }
+    var errorMessage by remember { mutableStateOf<String?>(null) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Invite Co-Parent") },
+        title = { Text("Invite Co-Parent", fontWeight = FontWeight.Bold) },
         text = {
-            Column {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 if (inviteCode != null) {
-                    Text("Invitation Code:")
-                    Text(inviteCode!!, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold, modifier = Modifier.padding(vertical = 8.dp))
-                    Text("Share this code with the co-parent. It expires in 24 hours.", style = MaterialTheme.typography.bodySmall)
-                } else {
-                    Text("Enter the email address of the person you want to invite.")
-                    Spacer(Modifier.height(8.dp))
-                    OutlinedTextField(
-                        value = inviteEmail,
-                        onValueChange = { inviteEmail = it },
-                        label = { Text("Email Address") },
-                        modifier = Modifier.fillMaxWidth()
+                    val context = LocalContext.current
+                    Text(
+                        "Share this code with the co-parent:",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = Color.Gray
                     )
+                    Spacer(Modifier.height(16.dp))
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFFE8EAF6)),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Text(
+                            text = inviteCode!!,
+                            style = MaterialTheme.typography.headlineMedium,
+                            fontWeight = FontWeight.Bold,
+                            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                            modifier = Modifier.fillMaxWidth().padding(16.dp),
+                            color = Color(0xFF3B4FBF)
+                        )
+                    }
+                    Spacer(Modifier.height(12.dp))
+                    // Share button
+                    OutlinedButton(
+                        onClick = {
+                            val shareIntent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                                type = "text/plain"
+                                putExtra(
+                                    android.content.Intent.EXTRA_TEXT,
+                                    "You've been invited to join Safe Kids as a co-parent!\n\n" +
+                                            "1. Download Safe Kids app\n" +
+                                            "2. Sign up and choose the Co-Parent role\n" +
+                                            "3. Enter this code: ${inviteCode!!}\n\n" +
+                                            "Code expires in 24 hours."
+                                )
+                                putExtra(android.content.Intent.EXTRA_SUBJECT, "Safe Kids Co-Parent Invitation")
+                            }
+                            context.startActivity(
+                                android.content.Intent.createChooser(shareIntent, "Share invite code via")
+                            )
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = {
+                                val shareIntent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                                    type = "text/plain"
+                                    putExtra(
+                                        android.content.Intent.EXTRA_TEXT,
+                                        "You've been invited to join Safe Kids as a co-parent!\n\n" +
+                                                "1. Download Safe Kids app\n" +
+                                                "2. Sign up and choose the Co-Parent role\n" +
+                                                "3. Enter this code: ${inviteCode!!}\n\n" +
+                                                "Code expires in 24 hours."
+                                    )
+                                    putExtra(android.content.Intent.EXTRA_SUBJECT, "Safe Kids Co-Parent Invitation")
+                                }
+                                context.startActivity(
+                                    android.content.Intent.createChooser(shareIntent, "Share invite code via")
+                                )
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(12.dp)
+                        ) {
+                            Text("📤 Share Code")
+                        }
+                        Spacer(Modifier.width(8.dp))
+                        Text("Share Code")
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "The co-parent must sign up, choose the Co-Parent role, and enter this code. Expires in 24 hours.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color.Gray,
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                    )
+                } else {
+                    Text(
+                        "Generate a 6-character code to share with the person you want to invite as a co-parent.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = Color.Gray
+                    )
+                    if (errorMessage != null) {
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            text = errorMessage!!,
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
                 }
             }
         },
@@ -241,20 +320,25 @@ fun InviteCoParentDialog(
             } else {
                 Button(
                     onClick = {
-                        if (inviteEmail.isNotBlank()) {
-                            isGenerating = true
-                            coroutineScope.launch {
-                                val result = authManager.generateCoParentInviteCode(inviteEmail.trim())
-                                isGenerating = false
-                                if (result.isSuccess) {
-                                    inviteCode = result.getOrNull()
-                                }
+                        isGenerating = true
+                        errorMessage = null
+                        coroutineScope.launch {
+                            val result = authManager.generateCoParentInviteCode(null)
+                            isGenerating = false
+                            if (result.isSuccess) {
+                                inviteCode = result.getOrNull()
+                            } else {
+                                errorMessage = result.exceptionOrNull()?.message ?: "Failed to generate code"
                             }
                         }
                     },
-                    enabled = !isGenerating && inviteEmail.isNotBlank()
+                    enabled = !isGenerating
                 ) {
-                    if (isGenerating) CircularProgressIndicator(modifier = Modifier.size(24.dp)) else Text("Generate Code")
+                    if (isGenerating) {
+                        CircularProgressIndicator(modifier = Modifier.size(20.dp), color = Color.White, strokeWidth = 2.dp)
+                    } else {
+                        Text("Generate Code")
+                    }
                 }
             }
         },

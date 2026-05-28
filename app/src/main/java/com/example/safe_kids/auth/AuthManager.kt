@@ -1059,7 +1059,7 @@ class AuthManagerImpl(private val context: Context) : AuthManager {
         val inviteData = InviteCode(
             code = code,
             inviterId = currentUser.id,
-            invitedEmail = invitedEmail?.lowercase()?.trim(),
+            invitedEmail = null, // No email required — code-only flow
             expiresAt = expiresAt
         )
 

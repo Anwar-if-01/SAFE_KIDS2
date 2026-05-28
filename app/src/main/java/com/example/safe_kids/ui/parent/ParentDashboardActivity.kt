@@ -226,20 +226,8 @@ fun ParentDashboardScreen(
         onDispose { registration.remove() }
     }
 
-    // Pending invitation listener
-    DisposableEffect(currentUser?.email) {
-        val email = currentUser?.email?.lowercase()?.trim() ?: return@DisposableEffect onDispose {}
-        val registration = FirebaseFirestore.getInstance().collection(com.example.safe_kids.auth.AuthConfig.INVITE_CODES_COLLECTION)
-            .whereEqualTo("invitedEmail", email).whereEqualTo("isUsed", false)
-            .addSnapshotListener { snapshot, e ->
-                if (e != null || snapshot == null) return@addSnapshotListener
-                if (!snapshot.isEmpty) {
-                    val invite = snapshot.documents[0].toObject(com.example.safe_kids.auth.InviteCode::class.java)
-                    if (invite != null && invite.expiresAt > System.currentTimeMillis()) pendingInvitation = invite else pendingInvitation = null
-                } else pendingInvitation = null
-            }
-        onDispose { registration.remove() }
-    }
+    // Pending invitation is now code-only — no email matching needed
+// Co-parent enters the code manually in InviteCodeScreen during onboarding
 
     Scaffold(
         bottomBar = {
@@ -331,8 +319,7 @@ fun DashboardTab(
 
         // Stats Grid 2x2
         item {
-            StatsGrid(dashboardSummary)
-        }
+            StatsGrid(dashboardSummary, child, onNavigateToReports)        }
 
         // Weekly Activity Chart
         item {
@@ -485,25 +472,66 @@ fun QuickActionGrid(child: ChildProfile, currentUser: com.example.safe_kids.auth
 
 // ===== STATS GRID 2x2 =====
 @Composable
-fun StatsGrid(summary: DashboardSummary) {
+fun StatsGrid(summary: DashboardSummary, child: ChildProfile, onNavigateToReports: (String, String) -> Unit) {
+    val context = LocalContext.current
     Column(modifier = Modifier.padding(16.dp)) {
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            StatsCard(title = "Screen Time", value = formatMillis(summary.screenTimeMillis), icon = Icons.Default.Timer, color = PrimaryBlue, modifier = Modifier.weight(1f))
-            StatsCard(title = "Apps Used", value = "${summary.appsUsedCount}", icon = Icons.Default.GridView, color = AccentOrange, modifier = Modifier.weight(1f))
+            StatsCard(
+                title = "Screen Time",
+                value = formatMillis(summary.screenTimeMillis),
+                icon = Icons.Default.Timer,
+                color = PrimaryBlue,
+                modifier = Modifier.weight(1f),
+                onClick = { onNavigateToReports(child.id, child.name) }
+            )
+            StatsCard(
+                title = "Apps Used",
+                value = "${summary.appsUsedCount}",
+                icon = Icons.Default.GridView,
+                color = AccentOrange,
+                modifier = Modifier.weight(1f),
+                onClick = { context.startActivity(Intent(context, AppManagementActivity::class.java).apply {
+                    putExtra("CHILD_ID", child.id)
+                    putExtra("CHILD_NAME", child.name)
+                })}
+            )
         }
         Spacer(Modifier.height(12.dp))
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            StatsCard(title = "Notifications", value = "${summary.notificationCount}", icon = Icons.Default.Notifications, color = SuccessGreen, modifier = Modifier.weight(1f))
-            StatsCard(title = "Safety Status", value = if (summary.permissionIssues > 0) "Alert" else "Safe",
-                icon = if (summary.permissionIssues > 0) Icons.Default.Warning else Icons.Default.Shield, color = if (summary.permissionIssues > 0) WarningRed else PurpleIndigo, modifier = Modifier.weight(1f))
+            StatsCard(
+                title = "Notifications",
+                value = "${summary.notificationCount}",
+                icon = Icons.Default.Notifications,
+                color = SuccessGreen,
+                modifier = Modifier.weight(1f),
+                onClick = { context.startActivity(Intent(context, NotificationMonitoringActivity::class.java).apply {
+                    putExtra("CHILD_ID", child.id)
+                    putExtra("CHILD_NAME", child.name)
+                })}
+            )
+            StatsCard(
+                title = "Safety Status",
+                value = if (summary.permissionIssues > 0) "Alert" else "Safe",
+                icon = if (summary.permissionIssues > 0) Icons.Default.Warning else Icons.Default.Shield,
+                color = if (summary.permissionIssues > 0) WarningRed else PurpleIndigo,
+                modifier = Modifier.weight(1f),
+                onClick = { context.startActivity(Intent(context, RequiredPermissionsActivity::class.java).apply {
+                    putExtra("CHILD_ID", child.id)
+                    putExtra("CHILD_NAME", child.name)
+                })}
+            )
         }
     }
 }
 
 @Composable
-fun StatsCard(title: String, value: String, icon: ImageVector, color: Color, modifier: Modifier = Modifier) {
-    Card(modifier = modifier, shape = RoundedCornerShape(16.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.cardElevation(4.dp)) {
+fun StatsCard(title: String, value: String, icon: ImageVector, color: Color, modifier: Modifier = Modifier, onClick: () -> Unit = {}) {
+    Card(
+        modifier = modifier.clickable { onClick() },
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        elevation = CardDefaults.cardElevation(4.dp)
+    ) {
         Column(modifier = Modifier.padding(16.dp)) {
             Surface(color = color.copy(alpha = 0.12f), shape = CircleShape, modifier = Modifier.size(42.dp)) {
                 Box(contentAlignment = Alignment.Center) { Icon(icon, null, tint = color, modifier = Modifier.size(22.dp)) }
