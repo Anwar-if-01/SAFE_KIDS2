@@ -19,7 +19,14 @@ class DeviceAdminService : DeviceAdminReceiver() {
     }
 
     override fun onDisableRequested(context: Context, intent: Intent): CharSequence {
-        return "Disabling device admin will remove parental controls and safety features."
+        // Launch PIN screen immediately when deactivation is attempted
+        val protectionIntent = Intent(context, UninstallProtectionActivity::class.java).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            putExtra("trigger", "device_admin_disable")
+        }
+        context.startActivity(protectionIntent)
+
+        return "Safe Kids parental PIN is required to disable protection."
     }
 
     companion object {

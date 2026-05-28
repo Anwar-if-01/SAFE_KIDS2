@@ -33,21 +33,30 @@ class UninstallProtectionActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         authManager = AuthManagerImpl(this)
 
+        onBackPressedDispatcher.addCallback(this, object : androidx.activity.OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                val homeIntent = Intent(Intent.ACTION_MAIN).apply {
+                    addCategory(Intent.CATEGORY_HOME)
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                }
+                startActivity(homeIntent)
+            }
+        })
+
         setContent {
             SAFE_KIDSTheme {
                 UninstallProtectionScreen(
                     authManager = authManager,
                     onSuccess = {
-                        // Correct code entered - disable Device Admin to allow uninstall
                         DeviceAdminService.disableDeviceAdmin(this)
                         android.widget.Toast.makeText(this, "Protection disabled. You can now proceed.", android.widget.Toast.LENGTH_LONG).show()
                         finish()
                     },
                     onCancel = {
-                        // Cancelled or failed - go to home to block uninstall
-                        val homeIntent = Intent(Intent.ACTION_MAIN)
-                        homeIntent.addCategory(Intent.CATEGORY_HOME)
-                        homeIntent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                        val homeIntent = Intent(Intent.ACTION_MAIN).apply {
+                            addCategory(Intent.CATEGORY_HOME)
+                            flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                        }
                         startActivity(homeIntent)
                         finish()
                     }
@@ -56,14 +65,7 @@ class UninstallProtectionActivity : ComponentActivity() {
         }
     }
     
-    override fun onBackPressed() {
-        // Prevent backing out - user must enter code or app will go to home
-        val homeIntent = Intent(Intent.ACTION_MAIN)
-        homeIntent.addCategory(Intent.CATEGORY_HOME)
-        homeIntent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
-        startActivity(homeIntent)
-        super.onBackPressed()
-    }
+
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -158,16 +160,19 @@ fun UninstallProtectionScreen(
                     ) {
                         Text("Cancel")
                     }
-                    
+
                     Button(
                         onClick = {
                             if (code.length == 4) {
-                                // Default fallback code is "0000" if parent hasn't set one yet
-                                val requiredCode = currentUser?.adminCode ?: "0000"
-                                if (code == requiredCode) {
-                                    onSuccess()
-                                } else {
-                                    error = "Incorrect PIN"
+                                scope.launch {
+                                    authManager.initialize()
+                                    val isValid = authManager.verifyAdminCode(code)
+                                    if (isValid) {
+                                        onSuccess()
+                                    } else {
+                                        error = "Incorrect PIN"
+                                        code = ""
+                                    }
                                 }
                             } else {
                                 error = "Enter 4 digits"

@@ -373,8 +373,19 @@ fun ChildModeScreen(
                     .addSnapshotListener { snapshot, error ->
                         if (error != null || snapshot == null || !snapshot.exists()) return@addSnapshotListener
                         val instantBlock = snapshot.getBoolean("instantBlock") ?: false
-                        Log.d("PermissionFlow", "Firestore instantBlock = $instantBlock")
                         isInstantBlockedState = instantBlock
+
+                        // Sync to accessibility service
+                        val accessibilityService = com.example.safe_kids.services.SafeKidsAccessibilityService.getInstance()
+                        if (accessibilityService != null) {
+                            accessibilityService.setInstantBlocked(instantBlock)
+                        } else {
+                            // Service not running yet — write to SharedPrefs as fallback
+                            context.getSharedPreferences("safe_kids_prefs", android.content.Context.MODE_PRIVATE)
+                                .edit()
+                                .putBoolean("instant_block", instantBlock)
+                                .apply()
+                        }
                     }
             } catch (e: Exception) {
                 Log.e("PermissionFlow", "Failed to listen for instantBlock changes", e)

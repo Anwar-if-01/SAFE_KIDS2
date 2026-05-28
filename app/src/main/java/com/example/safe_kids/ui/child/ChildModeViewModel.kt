@@ -83,16 +83,17 @@ class ChildModeViewModel(
     }
 
     private fun calculateAllowedApps(blockedPackages: Set<String>, alwaysAllowedPackages: Set<String>): List<String> {
+        // If parent hasn't set anything, show nothing
+        if (blockedPackages.isEmpty() && alwaysAllowedPackages.isEmpty()) return emptyList()
+
         val pm = context.packageManager
         val mainIntent = android.content.Intent(android.content.Intent.ACTION_MAIN, null)
         mainIntent.addCategory(android.content.Intent.CATEGORY_LAUNCHER)
-        
+
         val resolvedInfos = pm.queryIntentActivities(mainIntent, 0)
         return resolvedInfos
             .filter { info ->
                 val pkg = info.activityInfo.packageName
-                // Logic: (Not Blocked) OR (Always Allowed)
-                // Filter out the app itself and system apps if needed, but here we focus on the restrictions
                 (pkg !in blockedPackages || pkg in alwaysAllowedPackages) && pkg != context.packageName
             }
             .map { it.loadLabel(pm).toString() }

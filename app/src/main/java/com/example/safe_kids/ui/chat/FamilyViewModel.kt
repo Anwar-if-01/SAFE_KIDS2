@@ -15,11 +15,27 @@ class FamilyViewModel(
 ) : ViewModel() {
 
     private val familyId: StateFlow<String?> = authManager.currentUser.map { user ->
-        user?.parentIds?.firstOrNull() ?: user?.id
+        when {
+            user == null -> null
+            user.role == com.example.safe_kids.auth.UserRole.CHILD ->
+                user.parentIds.firstOrNull() ?: user.id
+            user.role.isParentLike ->
+                user.childIds.firstOrNull() ?: user.id
+            else -> user.id
+        }
     }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
     val currentUser: StateFlow<User?> = authManager.currentUser
-
+    private val otherId: StateFlow<String?> = authManager.currentUser.map { user ->
+        when {
+            user == null -> null
+            user.role == com.example.safe_kids.auth.UserRole.CHILD ->
+                user.parentIds.firstOrNull()
+            user.role.isParentLike ->
+                user.childIds.firstOrNull()
+            else -> null
+        }
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
     // Compute a chatId that matches the pairwise chat used by ChatActivity when possible.
     private val chatId: StateFlow<String?> = combine(currentUser, familyId) { user, fid ->
         if (user == null) return@combine null
@@ -46,10 +62,11 @@ class FamilyViewModel(
     fun sendMessage(text: String) {
         val user = currentUser.value ?: return
         val id = chatId.value ?: return
+        val receiver = otherId.value ?: return
         viewModelScope.launch {
             val message = ChatMessage(
                 senderId = user.id,
-                receiverId = id,
+                receiverId = receiver,
                 message = text,
                 timestamp = System.currentTimeMillis(),
                 isRead = false,
