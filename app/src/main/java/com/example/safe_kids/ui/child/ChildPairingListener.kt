@@ -43,12 +43,14 @@ object ChildPairingListener {
                 if (snapshot != null && snapshot.exists()) {
                     val parentIds = snapshot.get("parentIds") as? List<*>
                     val isPaired = !parentIds.isNullOrEmpty()
-                    val onboardingComplete = snapshot.getBoolean("onboardingComplete") ?: false
+                    val onboardingStep = snapshot.getString("onboardingStep") ?: ""
                     
-                    Log.d(TAG, "Pairing status update: isPaired=$isPaired, parentIds=$parentIds, onboardingComplete=$onboardingComplete")
+                    Log.d(TAG, "Pairing status update: isPaired=$isPaired, parentIds=$parentIds, onboardingStep=$onboardingStep")
                     
-                    if (isPaired && onboardingComplete) {
-                        Log.d(TAG, "Pairing detected! Navigating to ChildDashboardActivity")
+                    // Pairing is complete when parentIds is populated (parent successfully linked child)
+                    // onboardingStep transitions to PERMISSIONS after parent uses the code
+                    if (isPaired && onboardingStep == "PERMISSIONS") {
+                        Log.d(TAG, "Pairing detected! Parent linked child. Navigating to ChildDashboardActivity")
                         
                         // Navigate to Child Dashboard
                         val intent = Intent(context, ChildModeActivity::class.java).apply {

@@ -2375,9 +2375,14 @@ fun BindingCodeScreen(
         }
     }
 
-    LaunchedEffect(Unit) {
-        Log.d("PairingFlow", "BindingCodeScreen: Generating pairing code")
-        generateCode()
+    var hasGeneratedCode by remember { mutableStateOf(false) }
+    LaunchedEffect(currentUser?.id) {
+        val childId = currentUser?.id
+        if (childId != null && !hasGeneratedCode) {
+            Log.d("PairingFlow", "BindingCodeScreen: User ready, generating pairing code for UID: $childId")
+            generateCode()
+            hasGeneratedCode = true
+        }
     }
 
     OnboardingLayout(onSignOut = onSignOut, contentAlignment = Alignment.Center) {

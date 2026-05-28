@@ -118,12 +118,12 @@ fun SleepModeScreen(childId: String, childName: String, onBack: () -> Unit) {
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
                             Text("Active Status", fontWeight = FontWeight.Bold)
-                            Text(if (config.Enabled) "Scheduled" else "Disabled", style = MaterialTheme.typography.bodySmall)
+                            Text(if (config.isEnabled) "Scheduled" else "Disabled", style = MaterialTheme.typography.bodySmall)
                         }
                         Switch(
-                            checked = config.Enabled,
-                            onCheckedChange = { 
-                                config = config.copy(Enabled = it)
+                            checked = config.isEnabled,
+                            onCheckedChange = {
+                                config = config.copy(isEnabled = it)
                                 saveConfig(db, childId, config)
                             }
                         )
@@ -188,10 +188,10 @@ fun SleepModeScreen(childId: String, childName: String, onBack: () -> Unit) {
                 Spacer(modifier = Modifier.weight(1f))
 
                 // Manual End Button
-                if (config.Enabled) {
+                if (config.isEnabled) {
                     Button(
                         onClick = {
-                            config = config.copy(Enabled = false)
+                            config = config.copy(isEnabled = false)
                             saveConfig(db, childId, config)
                         },
                         modifier = Modifier.fillMaxWidth(),
@@ -269,7 +269,7 @@ fun TimePickerCard(label: String, time: String, modifier: Modifier = Modifier, o
 
 private fun saveConfig(db: FirebaseFirestore, childId: String, config: SleepModeConfig) {
     val data = mapOf(
-        "enabled" to config.Enabled,
+        "enabled" to config.isEnabled,
         "startTime" to config.startTime,
         "endTime" to config.endTime,
         "activeDays" to config.activeDays,

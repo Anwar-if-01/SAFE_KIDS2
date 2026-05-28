@@ -604,13 +604,18 @@ class AuthManagerImpl(private val context: Context) : AuthManager {
                             } else {
                                 linkChildToParent(callerId, pairingData.childId ?: "")
                             }
-                            
+
                             if (linkResult.isSuccess) {
-                                firestore.collection(AuthConfig.PAIRING_CODES_COLLECTION)
-                                    .document(pairingDoc.id)
-                                    .update(mapOf("isUsed" to true, "status" to "connected"))
-                                    .await()
-                                
+                                try {
+                                    firestore.collection(AuthConfig.PAIRING_CODES_COLLECTION)
+                                        .document(pairingDoc.id)
+                                        .update(mapOf("isUsed" to true, "status" to "connected"))
+                                        .await()
+                                } catch (e: Exception) {
+                                    Log.w(TAG, "Could not mark pairing code as used: ${e.message}")
+                                    // Non-fatal — linking already succeeded
+                                }
+
                                 refreshUserData()
                                 if (continuation.isActive) continuation.resume(Result.success(true)) {}
                             } else {

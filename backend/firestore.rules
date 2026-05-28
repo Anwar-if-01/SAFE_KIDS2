@@ -1,9 +1,301 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // ⚠️ TEMPORARY TESTING RULES — replace with targeted rules after pairing works
-    match /{document=**} {
-      allow read, write: if request.auth != null;
+   
+    function isAuthenticated() {
+      return request.auth != null;
     }
+    
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+    
+    function isParentOf(childId) {
+      return isAuthenticated() && 
+             (get(/databases/$(database)/documents/users/$(childId)).data.parentIds.hasAny([request.auth.uid]));
+    }
+
+    // --- USERS ---
+    match /users/{userId} {
+      allow read: if isOwner(userId) || isAuthenticated();
+      allow create: if isOwner(userId);
+      allow update: if isOwner(userId) || (
+        isAuthenticated() && (
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['parentIds'])
+          ||
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['parentIds', 'isOnboardingComplete'])
+          ||
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['childIds'])
+          ||
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['parentIds', 'onboardingStep'])
+          ||
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['parentIds', 'parentUid', 'isPaired', 'onboardingStep'])
+          ||
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['parentIds', 'onboardingStep', 'lastUpdated'])
+          ||
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['onboardingStep', 'lastUpdated'])
+          ||
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['parentIds', 'parentUid', 'isPaired', 'onboardingStep', 'lastUpdated'])
+        )
+      );
+      allow delete: if isOwner(userId);
+    }
+
+    match /users/{userId}/permissions/{permission} {
+      allow read, write: if isOwner(userId);
+    }
+
+    match /users/{userId}/{subcollection=**} {
+      allow read, write: if isOwner(userId) || isParentOf(userId);
+    }
+
+    // --- CHILD PROFILES ---
+    match /child_profiles/{childId} {
+      allow read, write: if isAuthenticated();
+    }
+
+    match /child_profiles/{childId}/{subcollection=**} {
+      allow read, write: if isAuthenticated();
+    }
+
+    match /child_profiles/{childId}/permissionFlags/{permission} {
+      allow read: if isOwner(childId) || isParentOf(childId);
+      allow write: if isOwner(childId);
+    }
+
+    // --- CHILDREN COLLECTION (instant block lives here) ---
+    match /children/{childId} {
+      allow read: if isOwner(childId) || isParentOf(childId);
+      allow write: if isOwner(childId) || isParentOf(childId);
+    }
+
+    match /children/{childId}/{subcollection=**} {
+      allow read, write: if isOwner(childId) || isParentOf(childId);
+    }
+
+    // --- SCREEN TIME ---
+    match /screen_time_limits/{childId} {
+      allow read: if isOwner(childId) || isParentOf(childId);
+      allow write: if isOwner(childId) || isParentOf(childId);
+    }
+
+    match /screen_time_requests/{parentId} {
+      allow read, write: if isAuthenticated();
+    }
+
+    match /screen_time_requests/{parentId}/{subcollection=**} {
+      allow read, write: if isAuthenticated();
+    }
+
+    // --- COMMANDS ---
+    match /child_commands/{commandId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated();
+      allow update, delete: if isAuthenticated();
+    }
+
+    // --- APP USAGE ---
+    match /app_usage_limits/{childId} {
+      allow read: if isOwner(childId) || isParentOf(childId);
+      allow write: if isParentOf(childId) || isOwner(childId);
+    }
+
+    match /usage_history/{childId} {
+      allow read, write: if isAuthenticated();
+    }
+
+    match /usage_history/{childId}/{subcollection=**} {
+      allow read, write: if isAuthenticated();
+    }
+
+    // --- LOCATION ---
+    match /locations/{childId} {
+      allow read: if isOwner(childId) || isParentOf(childId);
+      allow write: if isOwner(childId);
+    }
+
+    match /location_history/{childId} {
+      allow read: if isOwner(childId) || isParentOf(childId);
+      allow create: if isOwner(childId);
+    }
+
+    match /child_locations/{docId} {
+      allow read, write: if isAuthenticated();
+    }
+
+    match /location_alerts/{alertId} {
+      allow read, write: if isAuthenticated();
+    }
+
+    // --- GEOFENCES ---
+    match /geofences/{geofenceId} {
+      allow read, write: if isAuthenticated();
+    }
+
+    match /safe_zones/{parentId} {
+      allow read, write: if isAuthenticated();
+    }
+
+    match /safe_zones/{parentId}/{subcollection=**} {
+      allow read, write: if isAuthenticated();
+    }
+
+    match /restricted_areas/{parentId} {
+      allow read, write: if isAuthenticated();
+    }
+
+    match /restricted_areas/{parentId}/{subcollection=**} {
+      allow read, write: if isAuthenticated();
+    }
+
+    // --- ACTIVITIES AND LOGS ---
+    match /activities/{activityId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated();
+    }
+
+    match /activity_logs/{logId} {
+      allow read, write: if isAuthenticated();
+    }
+
+    match /activity_alerts/{alertId} {
+      allow read, write: if isAuthenticated();
+    }
+
+    match /content_safety_logs/{logId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated();
+    }
+
+    // --- ALERTS ---
+    match /alerts/{alertId} {
+      allow read, write: if isAuthenticated();
+    }
+
+    match /tampering_alerts/{alertId} {
+      allow read, write: if isAuthenticated();
+    }
+
+    match /sos_alerts/{alertId} {
+      allow read, write: if isAuthenticated();
+    }
+
+    // --- NOTIFICATIONS ---
+    match /notifications/{docId} {
+      allow read, write: if isAuthenticated();
+    }
+
+    match /child_notifications/{docId} {
+      allow read, write: if isAuthenticated();
+    }
+
+    // --- WEB HISTORY ---
+    match /web_history/{docId} {
+      allow read, write: if isAuthenticated();
+    }
+
+    // --- CHAT ---
+    match /chats/{docId} {
+      allow read, write: if isAuthenticated();
+    }
+
+    match /chats/{docId}/{subcollection=**} {
+      allow read, write: if isAuthenticated();
+    }
+
+    match /chat_messages/{msgId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated();
+    }
+
+    // --- PAIRING ---
+    match /pairing_codes/{codeId} {
+      allow read: if isAuthenticated() && (
+        resource == null || 
+        request.time.toMillis() < resource.data.createdAt + 600000
+      );
+      allow create: if isAuthenticated();
+      allow update: if isAuthenticated() && (
+        request.resource.data.isUsed == true && resource.data.isUsed == false
+      ) && request.time.toMillis() < resource.data.createdAt + 600000;
+      allow delete: if isAuthenticated();
+    }
+
+    match /invite_codes/{code} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated();
+    }
+
+    match /parent_child_relations/{relationId} {
+      allow read: if isAuthenticated() && (
+        request.auth.uid == resource.data.parentId || 
+        request.auth.uid == resource.data.childId
+      );
+      allow create: if isAuthenticated() && (
+        request.auth.uid == request.resource.data.parentId ||
+        request.auth.uid == request.resource.data.childId
+      );
+      allow update, delete: if isAuthenticated() && (
+        request.auth.uid == resource.data.parentId || 
+        request.auth.uid == resource.data.childId
+      );
+    }
+
+    // --- STUDY MODE ---
+    match /study_mode_configs/{childId} {
+      allow read: if isOwner(childId) || isParentOf(childId);
+      allow write: if isOwner(childId) || isParentOf(childId);
+    }
+
+    match /study_sessions/{childId} {
+      allow read, write: if isAuthenticated();
+    }
+
+    match /study_sessions/{childId}/{subcollection=**} {
+      allow read, write: if isAuthenticated();
+    }
+
+    // --- SLEEP MODE ---
+    match /sleep_mode_configs/{childId} {
+      allow read: if isOwner(childId) || isParentOf(childId);
+      allow write: if isOwner(childId) || isParentOf(childId);
+    }
+
+    match /sleep_sessions/{childId} {
+      allow read, write: if isAuthenticated();
+    }
+
+    match /sleep_sessions/{childId}/{subcollection=**} {
+      allow read, write: if isAuthenticated();
+    }
+
+    match /sleep_mode_emergency/{parentId} {
+      allow read, write: if isAuthenticated();
+    }
+
+    match /sleep_mode_emergency/{parentId}/{subcollection=**} {
+      allow read, write: if isAuthenticated();
+    }
+
+    // --- SCREENSHOTS ---
+    match /screenshots/{childId} {
+      allow read, write: if isOwner(childId) || isParentOf(childId);
+    }
+
+    match /screenshots/{childId}/{subcollection=**} {
+      allow read, write: if isOwner(childId) || isParentOf(childId);
+    }
+
+    // --- REPORTS ---
+    match /child_usage_reports/{docId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated();
+    }
+
+    // --- PRESENCE ---
+    match /child_presence/{childId} {
+      allow read, write: if isAuthenticated();
+    }
+
   }
 }

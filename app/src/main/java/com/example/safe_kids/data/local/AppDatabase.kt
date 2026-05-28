@@ -6,22 +6,20 @@ import androidx.room.Room
 import androidx.room.RoomDatabase
 
 @Database(entities = [
-    AppUsageEntity::class, 
-    GeofenceStateEntity::class, 
+    AppUsageEntity::class,
+    GeofenceStateEntity::class,
     AppRestrictionEntity::class,
     StudyModeConfigEntity::class,
     StudySessionEntity::class,
     SleepModeConfigEntity::class,
     SleepSessionEntity::class
-], version = 5, exportSchema = false)
+], version = 6, exportSchema = false)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun appUsageDao(): AppUsageDao
     abstract fun geofenceStateDao(): GeofenceStateDao
     abstract fun appRestrictionDao(): AppRestrictionDao
     abstract fun studyModeDao(): StudyModeDao
     abstract fun sleepModeDao(): SleepModeDao
-
-
 
     companion object {
         @Volatile
@@ -34,8 +32,9 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "safe_kids_database"
                 )
-                .fallbackToDestructiveMigration()
-                .build()
+                    .fallbackToDestructiveMigrationFrom(5)
+                    .fallbackToDestructiveMigration()
+                    .build()
                 INSTANCE = instance
                 instance
             }

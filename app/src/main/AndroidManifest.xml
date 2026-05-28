@@ -436,6 +436,11 @@
     android:name=".ui.child.PermissionSetupActivity"
     android:exported="false"
     android:theme="@style/Theme.SAFE_KIDS" />
+<activity
+    android:name=".ui.child.EditChildProfileActivity"
+    android:exported="false"
+    android:windowSoftInputMode="adjustResize"
+    android:theme="@style/Theme.SAFE_KIDS" />
 </application>
 
 </manifest>
